@@ -46,6 +46,12 @@
   const outputVideo = document.getElementById('output-video');
   const downloadLink = document.getElementById('download-link');
 
+  // Declared up front (not down by state's other fields) because the
+  // support-detection blocks below call updateGenerateButtonsDisabled(),
+  // which reads this — including, for mp4Supported, from a synchronous
+  // catch path that can run before the rest of the script has executed.
+  let orderValid = true; // gates Generate buttons independently of webpSupported/mp4Supported
+
   // WebKit (so every browser on iOS, regardless of name) has no animated-WebP
   // encoder and its canvas.toBlob('image/webp', ...) silently falls back to
   // PNG rather than erroring. Detect that once up front and disable the
@@ -81,19 +87,33 @@
       updateGenerateButtonsDisabled();
       return;
     }
-    VideoEncoder.isConfigSupported({ codec: 'avc1.42001f', width: 64, height: 64, bitrate: 1e5 })
-      .then((result) => {
-        mp4Supported = !!(result && result.supported);
-        if (!mp4Supported) {
-          generateMp4Btn.title = "This browser can't encode H.264 — use Generate GIF or WebP instead.";
-        }
-        updateGenerateButtonsDisabled();
-      })
-      .catch(() => {
-        mp4Supported = false;
-        generateMp4Btn.title = "This browser can't encode MP4 — use Generate GIF or WebP instead.";
-        updateGenerateButtonsDisabled();
-      });
+    // A browser with a partial/buggy WebCodecs implementation could have
+    // VideoEncoder exist but have isConfigSupported() throw synchronously
+    // instead of rejecting its promise (rather than just reporting
+    // unsupported) — and since this whole block runs unconditionally at
+    // script-load time, an uncaught throw here would abort the rest of
+    // editor.js entirely, including `window.Editor = ...` at the very
+    // bottom, breaking the app for everyone. Wrap it so any failure here
+    // — sync or async — degrades to "MP4 unsupported" instead.
+    try {
+      VideoEncoder.isConfigSupported({ codec: 'avc1.42001f', width: 64, height: 64, bitrate: 1e5 })
+        .then((result) => {
+          mp4Supported = !!(result && result.supported);
+          if (!mp4Supported) {
+            generateMp4Btn.title = "This browser can't encode H.264 — use Generate GIF or WebP instead.";
+          }
+          updateGenerateButtonsDisabled();
+        })
+        .catch(() => {
+          mp4Supported = false;
+          generateMp4Btn.title = "This browser can't encode MP4 — use Generate GIF or WebP instead.";
+          updateGenerateButtonsDisabled();
+        });
+    } catch (err) {
+      mp4Supported = false;
+      generateMp4Btn.title = "This browser can't encode MP4 — use Generate GIF or WebP instead.";
+      updateGenerateButtonsDisabled();
+    }
   })();
 
   const ALIGN_DISPLAY_MAX_W = 760;
@@ -155,7 +175,6 @@
     previewOrderIdx: 0, // index into state.order
   };
 
-  let orderValid = true; // gates Generate buttons independently of webpSupported
   let alignScale = 1;
   let previewScale = 1;
 
