@@ -11,32 +11,88 @@
   <h1>Fujifilm Real 3D W3 → Wiggle GIF</h1>
   <p class="intro">Pick an .MPO file straight off the camera and get back an animated GIF that flips between the left and right stereo frames.</p>
 
-  <div id="drop-zone">
+  <div class="drop-zone" id="drop-zone">
     <p>Drag &amp; drop an .MPO file here, or click to choose one</p>
     <input type="file" id="file-input" accept=".mpo,.jpg,.jpeg,image/*">
   </div>
 
-  <div class="control-row">
-    <label for="fps-slider">Flip speed: <span id="fps-label">4</span> fps</label>
-    <input type="range" id="fps-slider" min="1" max="15" step="1" value="4">
+  <p class="or-divider">or upload two separate JPEGs</p>
+
+  <div class="dual-drop-row">
+    <div class="drop-zone drop-zone-small" id="left-drop-zone">
+      <p>Left image<br><span class="file-name"></span></p>
+      <input type="file" id="left-file-input" accept=".jpg,.jpeg,image/*">
+    </div>
+    <div class="drop-zone drop-zone-small" id="right-drop-zone">
+      <p>Right image<br><span class="file-name"></span></p>
+      <input type="file" id="right-file-input" accept=".jpg,.jpeg,image/*">
+    </div>
   </div>
 
   <p id="status"></p>
 
-  <div class="previews" id="previews" hidden>
-    <div>
-      <h2>Left frame</h2>
-      <img id="preview-left" alt="Left frame">
+  <section id="editor" hidden>
+    <h2>Align &amp; crop</h2>
+    <p class="hint">Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.</p>
+    <div class="align-row">
+      <div class="align-main">
+        <canvas id="align-canvas" tabindex="0" aria-label="Alignment and crop editor"></canvas>
+        <button id="reset-align-btn" type="button">Reset alignment</button>
+      </div>
+      <div class="align-magnifier">
+        <canvas id="magnifier-canvas" width="320" height="320" aria-label="Zoomed view under cursor"></canvas>
+        <p class="hint" id="align-offset-label">Offset: 0, 0 px</p>
+      </div>
     </div>
-    <div>
-      <h2>Right frame</h2>
-      <img id="preview-right" alt="Right frame">
+
+    <h2>Preview</h2>
+    <p class="hint">This preview shows roughly what the GIF will look like.</p>
+    <canvas id="preview-canvas"></canvas>
+
+    <div class="control-row">
+      <label for="fps-slider">Flip speed</label>
+      <input type="range" id="fps-slider" min="1" max="30" step="1" value="8">
+      <input type="number" id="fps-value" class="value-input" min="1" max="30" step="1" value="8">
+      <span class="unit">fps</span>
     </div>
-  </div>
+    <div class="control-row">
+      <label for="brightness-slider">Brightness</label>
+      <input type="range" id="brightness-slider" min="-100" max="100" step="1" value="0">
+      <input type="number" id="brightness-value" class="value-input" min="-100" max="100" step="1" value="0">
+    </div>
+    <div class="control-row">
+      <label for="contrast-slider">Contrast</label>
+      <input type="range" id="contrast-slider" min="-100" max="100" step="1" value="0">
+      <input type="number" id="contrast-value" class="value-input" min="-100" max="100" step="1" value="0">
+    </div>
+    <div class="control-row">
+      <label for="hue-slider">Hue</label>
+      <input type="range" id="hue-slider" min="-180" max="180" step="1" value="0">
+      <input type="number" id="hue-value" class="value-input" min="-180" max="180" step="1" value="0">
+      <span class="unit">&deg;</span>
+    </div>
+    <div class="control-row">
+      <label><input type="checkbox" id="anaglyph-checkbox"> Anaglyph tint (red/cyan)</label>
+    </div>
+
+    <h2>Export</h2>
+    <div class="control-row">
+      <label for="scale-slider">Output scale</label>
+      <input type="range" id="scale-slider" min="10" max="100" step="1" value="100">
+      <input type="number" id="scale-value" class="value-input" min="10" max="100" step="1" value="100">
+      <span class="unit">%</span>
+    </div>
+    <p class="hint" id="output-size-label">Output size: —</p>
+
+    <div class="button-row">
+      <button id="generate-gif-btn" type="button">Generate GIF</button>
+      <button id="generate-webp-btn" type="button">Generate WebP</button>
+    </div>
+  </section>
 
   <div class="output" id="output" hidden>
-    <h2>Result</h2>
-    <img id="output-gif" alt="Alternating GIF">
+    <h2>Result <span class="hint-inline" id="result-size-label"></span></h2>
+    <img id="output-gif" alt="Alternating output">
     <br>
     <a id="download-link" download>Download GIF</a>
   </div>
@@ -44,5 +100,6 @@
 
 <script src="lib/gif.js"></script>
 <script src="app.js" defer></script>
+<script src="editor.js" defer></script>
 </body>
 </html>

@@ -1,19 +1,17 @@
 (function () {
   const fileInput = document.getElementById('file-input');
   const dropZone = document.getElementById('drop-zone');
-  const fpsSlider = document.getElementById('fps-slider');
-  const fpsLabel = document.getElementById('fps-label');
   const statusEl = document.getElementById('status');
-  const previewsEl = document.getElementById('previews');
-  const previewLeft = document.getElementById('preview-left');
-  const previewRight = document.getElementById('preview-right');
-  const outputEl = document.getElementById('output');
-  const outputGif = document.getElementById('output-gif');
-  const downloadLink = document.getElementById('download-link');
 
-  let currentImages = null; // [Image, Image]
+  const leftFileInput = document.getElementById('left-file-input');
+  const leftDropZone = document.getElementById('left-drop-zone');
+  const rightFileInput = document.getElementById('right-file-input');
+  const rightDropZone = document.getElementById('right-drop-zone');
+
   let currentFileBaseName = 'wiggle';
   let trackedObjectUrls = [];
+  let pendingLeftFile = null;
+  let pendingRightFile = null;
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -24,6 +22,12 @@
     trackedObjectUrls.forEach(URL.revokeObjectURL);
     trackedObjectUrls = [];
   }
+
+  function trackObjectUrl(url) {
+    trackedObjectUrls.push(url);
+  }
+
+  window.AppShared = { setStatus, trackObjectUrl };
 
   // Walks JPEG marker segments from an SOI to find the true matching EOI.
   // A naive scan for the next 0xFFD9 byte pair is unsafe: the Exif (APP1)
@@ -94,7 +98,7 @@
     return new Promise((resolve, reject) => {
       const blob = new Blob([bytes], { type: 'image/jpeg' });
       const url = URL.createObjectURL(blob);
-      trackedObjectUrls.push(url);
+      trackObjectUrl(url);
       const img = new Image();
       img.onload = () => resolve(img);
       img.onerror = () => reject(new Error('Could not decode an extracted frame as a JPEG image.'));
@@ -102,54 +106,45 @@
     });
   }
 
-  function renderGif() {
-    if (!currentImages) return Promise.resolve();
-    const [imgLeft, imgRight] = currentImages;
-    const fps = Number(fpsSlider.value);
-    const delay = Math.round(1000 / fps);
-
-    setStatus('Encoding GIF…');
-
-    const canvas = document.createElement('canvas');
-    canvas.width = imgLeft.naturalWidth;
-    canvas.height = imgLeft.naturalHeight;
-    const ctx = canvas.getContext('2d');
-
-    const gif = new GIF({
-      workers: 2,
-      quality: 10,
-      workerScript: 'lib/gif.worker.js',
-      width: canvas.width,
-      height: canvas.height,
-    });
-
-    ctx.drawImage(imgLeft, 0, 0, canvas.width, canvas.height);
-    gif.addFrame(canvas, { copy: true, delay });
-    ctx.drawImage(imgRight, 0, 0, canvas.width, canvas.height);
-    gif.addFrame(canvas, { copy: true, delay });
-
-    return new Promise((resolve) => {
-      gif.on('progress', (p) => setStatus(`Encoding GIF… ${Math.round(p * 100)}%`));
-      gif.on('finished', (blob) => {
-        const url = URL.createObjectURL(blob);
-        trackedObjectUrls.push(url);
-        outputGif.src = url;
-        downloadLink.href = url;
-        downloadLink.download = `${currentFileBaseName}.gif`;
-        outputEl.hidden = false;
-        setStatus('Done.');
-        resolve();
-      });
-      gif.render();
+  function loadImageFromFile(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      trackObjectUrl(url);
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`Could not decode "${file.name}" as a JPEG image.`));
+      img.src = url;
     });
   }
 
-  async function handleFile(file) {
+  function beginNewLoad(baseName) {
+    window.Editor.reset();
     revokeTrackedUrls();
-    outputEl.hidden = true;
-    previewsEl.hidden = true;
-    currentImages = null;
-    currentFileBaseName = file.name.replace(/\.[^.]+$/, '') || 'wiggle';
+    currentFileBaseName = baseName;
+  }
+
+  function finishLoadingFrames(imgLeft, imgRight) {
+    window.Editor.load(imgLeft, imgRight, currentFileBaseName);
+    setStatus('Ready — align, crop, and adjust below, then generate the GIF.');
+  }
+
+  function setDualBoxFile(zoneEl, nameEl, file) {
+    zoneEl.classList.toggle('has-file', !!file);
+    nameEl.textContent = file ? file.name : '';
+  }
+
+  function resetDualBoxes() {
+    pendingLeftFile = null;
+    pendingRightFile = null;
+    leftFileInput.value = '';
+    rightFileInput.value = '';
+    setDualBoxFile(leftDropZone, leftDropZone.querySelector('.file-name'), null);
+    setDualBoxFile(rightDropZone, rightDropZone.querySelector('.file-name'), null);
+  }
+
+  async function handleFile(file) {
+    resetDualBoxes();
+    beginNewLoad(file.name.replace(/\.[^.]+$/, '') || 'wiggle');
 
     fileInput.disabled = true;
     setStatus('Reading file…');
@@ -168,12 +163,7 @@
         loadImageFromBytes(frames[1]),
       ]);
 
-      currentImages = [imgLeft, imgRight];
-      previewLeft.src = imgLeft.src;
-      previewRight.src = imgRight.src;
-      previewsEl.hidden = false;
-
-      await renderGif();
+      finishLoadingFrames(imgLeft, imgRight);
     } catch (err) {
       console.error(err);
       setStatus(err.message || 'Something went wrong reading that file.', true);
@@ -182,33 +172,55 @@
     }
   }
 
-  fpsLabel.textContent = fpsSlider.value;
-  fpsSlider.addEventListener('input', () => {
-    fpsLabel.textContent = fpsSlider.value;
-  });
-  fpsSlider.addEventListener('change', () => {
-    if (currentImages) renderGif();
-  });
+  async function handleTwoFiles(leftFile, rightFile) {
+    fileInput.value = '';
+    beginNewLoad(leftFile.name.replace(/\.[^.]+$/, '') || 'wiggle');
 
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files[0]) handleFile(fileInput.files[0]);
-  });
+    setStatus('Decoding frames…');
+    try {
+      const [imgLeft, imgRight] = await Promise.all([
+        loadImageFromFile(leftFile),
+        loadImageFromFile(rightFile),
+      ]);
+      finishLoadingFrames(imgLeft, imgRight);
+    } catch (err) {
+      console.error(err);
+      setStatus(err.message || 'Something went wrong reading those files.', true);
+    }
+  }
 
-  ['dragenter', 'dragover'].forEach((evt) =>
-    dropZone.addEventListener(evt, (e) => {
+  function wireDropZone(zoneEl, inputEl, onFile) {
+    inputEl.addEventListener('change', () => {
+      if (inputEl.files[0]) onFile(inputEl.files[0]);
+    });
+    ['dragenter', 'dragover'].forEach((evt) =>
+      zoneEl.addEventListener(evt, (e) => {
+        e.preventDefault();
+        zoneEl.classList.add('dragover');
+      })
+    );
+    ['dragleave', 'dragend'].forEach((evt) =>
+      zoneEl.addEventListener(evt, () => zoneEl.classList.remove('dragover'))
+    );
+    zoneEl.addEventListener('drop', (e) => {
       e.preventDefault();
-      dropZone.classList.add('dragover');
-    })
-  );
-  ['dragleave', 'dragend'].forEach((evt) =>
-    dropZone.addEventListener(evt, () => {
-      dropZone.classList.remove('dragover');
-    })
-  );
-  dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    const file = e.dataTransfer.files && e.dataTransfer.files[0];
-    if (file) handleFile(file);
+      zoneEl.classList.remove('dragover');
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file) onFile(file);
+    });
+  }
+
+  wireDropZone(dropZone, fileInput, handleFile);
+
+  wireDropZone(leftDropZone, leftFileInput, (file) => {
+    pendingLeftFile = file;
+    setDualBoxFile(leftDropZone, leftDropZone.querySelector('.file-name'), file);
+    if (pendingRightFile) handleTwoFiles(pendingLeftFile, pendingRightFile);
+  });
+
+  wireDropZone(rightDropZone, rightFileInput, (file) => {
+    pendingRightFile = file;
+    setDualBoxFile(rightDropZone, rightDropZone.querySelector('.file-name'), file);
+    if (pendingLeftFile) handleTwoFiles(pendingLeftFile, pendingRightFile);
   });
 })();
