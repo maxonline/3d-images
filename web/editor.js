@@ -13,15 +13,7 @@
 
   const frameThumbSectionEl = document.getElementById('frame-thumb-section');
   const thumbStripEl = document.getElementById('thumb-strip');
-
-  const alignStepControlsEl = document.getElementById('align-step-controls');
-  const alignStepFrameNumEl = document.getElementById('align-step-frame-num');
-  const alignStepTotalEl = document.getElementById('align-step-total');
-  const alignBackBtn = document.getElementById('align-back-btn');
-  const alignConfirmBtn = document.getElementById('align-confirm-btn');
-
-  const alignEditLinkRowEl = document.getElementById('align-edit-link-row');
-  const editAlignmentBtn = document.getElementById('edit-alignment-btn');
+  const alignHintEl = document.getElementById('align-hint');
 
   const cropExportPanelEl = document.getElementById('crop-export-panel');
 
@@ -139,12 +131,13 @@
     return state.frames.length;
   }
 
-  function alignDragEnabled() {
-    return state.mode === 'stepping' || frameCount() === 2;
-  }
-
+  // The align canvas always drags whichever frame is currently selected
+  // (state.alignStep.current) — for 2 frames that's permanently frame 1
+  // (no thumbnail strip exists to reselect it); for 3+ frames it's whichever
+  // thumbnail was last clicked, regardless of whether alignment is still in
+  // its initial pass or every frame has already been touched once.
   function activeAlignFrameIndex() {
-    return state.mode === 'stepping' ? state.alignStep.current : 1;
+    return state.alignStep.current;
   }
 
   function computeScale(canvasEl, nativeW, nativeH, maxW, maxH) {
@@ -198,12 +191,16 @@
     return { x0, y0, x1, y1, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
   }
 
-  // While stepping, only confirmed frames plus the one currently being
-  // dragged contribute to the overlap — frames not yet reached don't exist
-  // in the composition yet. Once ready, every frame's final offset counts.
+  // While stepping, only confirmed frames contribute to the overlap — frames
+  // never selected yet don't have a settled position. selectFrame() confirms
+  // a frame the instant it's chosen, so the active frame is always already
+  // included here by the time this runs; confirmation order is NOT
+  // necessarily increasing index order (frames can be picked in any order),
+  // so this must filter by the confirmed set, not slice a contiguous prefix.
+  // Once ready, every frame's final offset counts, confirmed or not.
   function currentOverlapFrames() {
     return state.mode === 'stepping'
-      ? state.frames.slice(0, state.alignStep.current + 1)
+      ? state.frames.filter((f, i) => state.alignStep.confirmed[i])
       : state.frames;
   }
 
@@ -469,6 +466,16 @@
     return Array.from({ length: Math.max(0, b - a) }, (_, i) => a + i);
   }
 
+  // Confirmed frames EXCLUDING the currently active one (which is drawn
+  // separately, as the translucent "thing you're moving" layer). Frames can
+  // be confirmed in any order via thumbnail clicks, so this must filter the
+  // actual confirmed set rather than assume a contiguous 0..current-1 range.
+  function confirmedBackdropIndices() {
+    return state.frames
+      .map((f, i) => i)
+      .filter((i) => state.alignStep.confirmed[i] && i !== state.alignStep.current);
+  }
+
   // Draws already-confirmed frames stacked at globalAlpha = 1/(position),
   // which by induction produces the exact unweighted pixel average of those
   // frames on an opaque canvas — not merely an approximation of a blend.
@@ -502,7 +509,7 @@
     }
 
     if (state.mode === 'stepping') {
-      drawRunningAverageStack(range(0, state.alignStep.current), state.alignStep.current, drawOneFrame);
+      drawRunningAverageStack(confirmedBackdropIndices(), state.alignStep.current, drawOneFrame);
     } else if (frameCount() === 2) {
       drawOneFrame(0, 1);
       drawOneFrame(1, 0.5);
@@ -574,7 +581,7 @@
       alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
       return;
     }
-    alignCanvas.style.cursor = alignDragEnabled() ? 'grab' : 'default';
+    alignCanvas.style.cursor = 'grab';
   }
 
   // --- Align & crop canvas (one shared view: ghosted composite for
@@ -597,7 +604,7 @@
     }
 
     if (state.mode === 'stepping') {
-      drawRunningAverageStack(range(0, state.alignStep.current), state.alignStep.current, drawOneFrame);
+      drawRunningAverageStack(confirmedBackdropIndices(), state.alignStep.current, drawOneFrame);
     } else if (frameCount() === 2) {
       drawOneFrame(0, 1);
       drawOneFrame(1, 0.5);
@@ -621,7 +628,6 @@
   }
 
   function nudgeAlign(ddx, ddy) {
-    if (!alignDragEnabled()) return;
     const f = state.frames[activeAlignFrameIndex()];
     const clamped = clampAlign(f.dx + ddx, f.dy + ddy, state.W, state.H);
     f.dx = clamped.dx;
@@ -651,7 +657,7 @@
         startClientY: e.clientY,
         startCrop: { ...state.crop },
       };
-    } else if (alignDragEnabled()) {
+    } else {
       const targetFrame = activeAlignFrameIndex();
       const f = state.frames[targetFrame];
       alignCanvas.style.cursor = 'grabbing';
@@ -732,7 +738,6 @@
   });
 
   resetAlignBtn.addEventListener('click', () => {
-    if (!alignDragEnabled()) return;
     const f = state.frames[activeAlignFrameIndex()];
     f.dx = 0;
     f.dy = 0;
@@ -746,13 +751,22 @@
     if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
   });
 
-  // --- Step-by-step alignment for 3+ frames ---
+  // --- Frame selection for 3+ frames ---
+  //
+  // No wizard buttons: every non-anchor frame's thumbnail is directly
+  // clickable at any time (during the initial pass AND after everything's
+  // already been touched once) — clicking one makes it the active frame on
+  // the align canvas and immediately marks it confirmed (a frame left at
+  // its default {0,0} offset is a valid confirmation, same as before, just
+  // without a separate "Confirm" click to say so explicitly). The crop/
+  // export panel unlocks the first time every frame has been confirmed at
+  // least once, and stays unlocked from then on — selecting a frame again
+  // later to fine-tune it doesn't re-hide it.
 
-  function updateStepLabel() {
-    alignStepFrameNumEl.textContent = String(state.alignStep.current + 1);
-    alignStepTotalEl.textContent = String(frameCount());
-    alignBackBtn.disabled = state.alignStep.current <= 1;
-    alignConfirmBtn.textContent = state.alignStep.current === frameCount() - 1 ? 'Confirm & finish' : 'Confirm & next';
+  function updateAlignHint() {
+    alignHintEl.textContent = frameCount() > 2
+      ? 'Click a frame below to select it, then drag it (or use arrow keys, 1px per press) onto the ghosted average of every frame already aligned. Every frame needs a click before you can crop. Drag an orange corner handle to resize the crop once it appears. Hover for a zoomed-in view.'
+      : "Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.";
   }
 
   function renderThumbnailStrip() {
@@ -760,16 +774,38 @@
     if (frameCount() <= 2) return;
     thumbStripEl.innerHTML = '';
     state.frames.forEach((f, i) => {
-      const wrap = document.createElement('div');
-      wrap.className = 'thumb';
+      const wrap = document.createElement('button');
+      wrap.type = 'button';
+      wrap.className = i === 0 ? 'thumb thumb-anchor' : 'thumb';
+
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'thumb-image-wrap';
+
       const img = document.createElement('img');
       img.className = 'thumb-img';
       img.src = f.img.src;
       img.alt = `Frame ${i + 1}`;
+      imgWrap.appendChild(img);
+
+      if (i > 0) {
+        const badge = document.createElement('span');
+        badge.className = 'thumb-badge';
+        badge.textContent = 'Not aligned';
+        imgWrap.appendChild(badge);
+
+        const arrow = document.createElement('span');
+        arrow.className = 'thumb-arrow';
+        arrow.textContent = '↓'; // downward arrow, pointing at the suggested-next thumbnail
+        imgWrap.appendChild(arrow);
+
+        wrap.addEventListener('click', () => selectFrame(i));
+      }
+
       const label = document.createElement('span');
       label.className = 'thumb-label';
       label.textContent = String(i + 1);
-      wrap.appendChild(img);
+
+      wrap.appendChild(imgWrap);
       wrap.appendChild(label);
       thumbStripEl.appendChild(wrap);
     });
@@ -778,38 +814,39 @@
 
   function updateThumbnailStripState() {
     if (frameCount() <= 2) return;
-    const activeIndex = state.mode === 'stepping' ? state.alignStep.current : -1;
+    const nextSuggested = state.frames.findIndex((f, i) => i > 0 && !state.alignStep.confirmed[i]);
     Array.from(thumbStripEl.children).forEach((el, i) => {
-      el.classList.toggle('confirmed', !!state.alignStep.confirmed[i] || state.mode === 'ready');
-      el.classList.toggle('active', i === activeIndex);
+      el.classList.toggle('confirmed', !!state.alignStep.confirmed[i]);
+      el.classList.toggle('active', i === state.alignStep.current);
+      el.classList.toggle('suggested-next', i === nextSuggested);
     });
   }
 
   function applyModeVisibility() {
     const ready = state.mode === 'ready';
-    const stepping = state.mode === 'stepping';
     const multi = frameCount() > 2;
 
     frameThumbSectionEl.hidden = !multi;
-    alignStepControlsEl.hidden = !stepping;
-    alignEditLinkRowEl.hidden = !(ready && multi);
-    resetAlignBtn.hidden = !alignDragEnabled();
-    alignMagnifierColEl.hidden = !alignDragEnabled();
     cropExportPanelEl.hidden = !ready;
     orderSectionEl.hidden = !(ready && multi);
-    alignCanvas.style.cursor = alignDragEnabled() ? 'grab' : 'default';
   }
 
-  function onStepChanged() {
+  // Redraws everything after the active frame changes, WITHOUT touching
+  // mode/crop/order state — used both during the initial pass and for later
+  // re-selections once already in ready mode.
+  function refreshAfterFrameSelection() {
     applyModeVisibility();
     drawAlignmentCanvas();
     updateOffsetLabel();
-    updateStepLabel();
     updateThumbnailStripState();
     lastHoverNative = null;
     hideMagnifier();
   }
 
+  // The one-time transition once every frame has been confirmed at least
+  // once. Never runs again after that — re-selecting a frame later just
+  // goes through refreshAfterFrameSelection() instead, leaving whatever
+  // crop/order/adjustments the user already set untouched.
   function enterReadyMode() {
     state.mode = 'ready';
     resetCropToOverlap();
@@ -834,32 +871,18 @@
     startPreviewLoop();
   }
 
-  function confirmCurrentStep() {
-    const k = state.alignStep.current;
-    state.alignStep.confirmed[k] = true;
-    if (k + 1 < frameCount()) {
-      state.alignStep.current = k + 1;
-      onStepChanged();
-    } else {
+  function selectFrame(index) {
+    if (index <= 0 || index >= frameCount()) return; // frame 0 is the fixed anchor, not selectable
+    state.alignStep.current = index;
+    const alreadyConfirmed = state.alignStep.confirmed[index];
+    state.alignStep.confirmed[index] = true;
+
+    if (!alreadyConfirmed && state.mode !== 'ready' && state.alignStep.confirmed.every(Boolean)) {
       enterReadyMode();
+    } else {
+      refreshAfterFrameSelection();
     }
   }
-
-  function backStep() {
-    if (state.alignStep.current <= 1) return;
-    state.alignStep.current -= 1;
-    onStepChanged(); // deliberately does NOT clear confirmed[] for frames beyond the new current
-  }
-
-  alignConfirmBtn.addEventListener('click', confirmCurrentStep);
-  alignBackBtn.addEventListener('click', backStep);
-
-  editAlignmentBtn.addEventListener('click', () => {
-    stopPreviewLoop();
-    state.mode = 'stepping';
-    state.alignStep.current = frameCount() - 1;
-    onStepChanged();
-  });
 
   // --- Live preview animation loop (read-only mimic of the final GIF) ---
 
@@ -1252,6 +1275,7 @@
     state.cropRatio = null;
 
     updateColorModeAvailability();
+    updateAlignHint();
     renderThumbnailStrip();
     recomputeAlignScale();
 
@@ -1265,7 +1289,7 @@
       state.mode = 'stepping';
       state.alignStep.current = 1;
       state.alignStep.confirmed = state.frames.map((_, i) => i === 0);
-      onStepChanged();
+      refreshAfterFrameSelection();
     } else {
       state.alignStep.current = 1;
       state.alignStep.confirmed = state.frames.map(() => true);

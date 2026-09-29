@@ -107,19 +107,32 @@ from `<template id="frame-drop-zone-template">`); filling any box re-fires
 no "commit" step, matching the old 2-box behavior exactly generalized. When
 you touch anything align/crop-related, sanity-check the N=2 path still
 behaves identically — `frameCount() === 2` is threaded through as the
-condition that keeps every new UI section (thumbnail strip, step controls,
-"Edit alignment" link, animation-order box) permanently hidden via
-`applyModeVisibility()`.
+condition that keeps every new UI section (thumbnail strip, animation-order
+box) permanently hidden via `applyModeVisibility()`.
 
-**Step-by-step alignment for 3+ frames (`state.mode`: `'stepping'` | `'ready'`).**
-Frame *k* is aligned by dragging it against everything confirmed so far
-(`state.alignStep.current`, `state.alignStep.confirmed[]`); the crop/preview/
-export UI (`#crop-export-panel`) only appears once every frame has been
-explicitly confirmed via the Confirm button — leaving a frame at its default
-`{0,0}` offset is a valid confirmation, no drag required. The ghosted
-backdrop you align against is drawn by `drawRunningAverageStack`, which
-draws each already-confirmed frame at `globalAlpha = 1/(its position among
-confirmed frames)` — this is worth knowing precisely because it is
+**Click-to-select alignment for 3+ frames (`state.mode`: `'stepping'` |
+`'ready'`) — no wizard buttons, frames can be aligned in any order.**
+Every non-anchor frame gets a clickable thumbnail (`renderThumbnailStrip`);
+clicking one (`selectFrame(index)`) makes it the active frame on the align
+canvas AND immediately marks it confirmed — a frame left at its default
+`{0,0}` offset is a valid confirmation, no drag required, and there's no
+separate "Confirm" step. Frames not yet confirmed show a "Not aligned" text
+badge over their thumbnail (`.thumb-badge`, CSS-driven by the absence of the
+`.confirmed` class); the lowest-indexed unconfirmed non-anchor frame gets a
+small arrow (`.suggested-next`) as a hint, but clicking any other pending
+thumbnail works too — `state.alignStep.current` is just "whichever frame was
+clicked most recently," not a strict sequence position. The crop/preview/
+export UI (`#crop-export-panel`) unlocks the *first* time every frame has
+been confirmed at least once (`state.mode` flips to `'ready'` inside
+`enterReadyMode()`, called from `selectFrame`) and **stays unlocked
+permanently** — clicking a thumbnail again later (even one already
+confirmed) just reselects it for further dragging via
+`refreshAfterFrameSelection()`, without re-hiding the crop panel or
+resetting the crop/order/adjustments `enterReadyMode()` already set up.
+
+The ghosted backdrop you align against is drawn by `drawRunningAverageStack`,
+which draws each already-confirmed *other* frame at `globalAlpha = 1/(its
+position in that list)` — this is worth knowing precisely because it is
 **mathematically exact**, not a fudge: by induction, sequentially compositing
 frame *i* (1-indexed) at `1/i` produces the exact unweighted pixel average of
 all frames drawn so far, for opaque sources. The frame currently being
@@ -127,14 +140,19 @@ dragged is drawn on top at a fixed ~0.55 alpha, not part of that average.
 `drawAlignmentCanvas` and `drawMagnifier` both call this same helper with
 the same branching (stepping vs. 2-frame-ready vs. N>2-ready-mode static
 ghost) so the loupe never shows something different from the main canvas.
-Back-navigation (`backStep`) deliberately does not clear `confirmed[]` for
-frames beyond the one you rewind to — this is a low-stakes personal tool,
-and since the crop/overlap is only computed once, in `enterReadyMode()`,
-after every step is confirmed, edits made via Back flow through correctly
-regardless of visit order. `currentOverlapRect()` during stepping only
-intersects confirmed frames + the one currently being dragged
-(`currentOverlapFrames()`), which is why the dashed overlap outline visibly
-shrinks as each new frame gets positioned.
+
+**Confirmation order is NOT necessarily increasing index order — this was a
+real bug, caught and fixed, not just a theoretical concern.** Both the
+backdrop list (`confirmedBackdropIndices()`) and the live overlap
+(`currentOverlapFrames()`) must filter `state.frames` by the actual
+`confirmed[]` set, not slice a `0..current` prefix — an earlier version used
+`state.frames.slice(0, state.alignStep.current + 1)`, which silently dropped
+a higher-index frame's real offset from the overlap/backdrop the moment you
+clicked a *lower*-index thumbnail afterward (`current` decreasing broke the
+prefix assumption). Confirmed with a targeted test: drag frame 3 to a large
+offset, confirm it, then select frame 2 — `currentOverlapRect()` must still
+reflect frame 3's offset afterward. If you touch either of these functions,
+re-run that scenario, not just the "click 1, 2, 3 in order" happy path.
 
 **Animation order (`state.order`, 3+ frames only).** A validated,
 comma-separated 1-indexed text field (`#order-input`, `parseOrder`/
