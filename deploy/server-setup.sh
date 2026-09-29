@@ -1,5 +1,5 @@
 #!/bin/sh
-# One-time production server setup for image3d.maxonline.se.
+# One-time production server setup for wiggle.maxonline.se.
 #
 # Installs nginx/certbot if missing, creates the deploy directory, and adds
 # an nginx site for this domain WITHOUT touching any other site already
@@ -11,8 +11,8 @@
 set -eu
 
 REMOTE_HOST="max@192.168.50.31"
-DOMAIN="image3d.maxonline.se"
-DEPLOY_PATH="/home/max/apps/image3d"
+DOMAIN="wiggle.maxonline.se"
+DEPLOY_PATH="/home/max/apps/wiggle"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 echo "Copying nginx site config to $REMOTE_HOST..."

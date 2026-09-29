@@ -6,7 +6,7 @@
 set -eu
 
 REMOTE_HOST="max@192.168.50.31"
-REMOTE_PATH="/home/max/apps/image3d/"
+REMOTE_PATH="/home/max/apps/wiggle/"
 LOCAL_PATH="$(CDPATH= cd -- "$(dirname -- "$0")/web" && pwd)/"
 
 RSYNC_OPTS="-avz --delete"
