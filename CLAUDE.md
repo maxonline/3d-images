@@ -2,9 +2,9 @@
 
 A static, no-build client-side web app that turns a Fujifilm FinePix Real 3D
 W3 stereo photo (`.MPO` file) or a set of 2–10 separately-uploaded JPEGs into
-an animated "wigglegram" GIF or WebP — cycling through the frames to fake 3D
-depth or create a burst-sequence animation. Everything runs in the browser;
-there is no server-side code and no build step.
+an animated "wigglegram" GIF, WebP, or MP4 — cycling through the frames to
+fake 3D depth or create a burst-sequence animation. Everything runs in the
+browser; there is no server-side code and no build step.
 
 ## Running it
 
@@ -32,9 +32,10 @@ web/
                  frame upload boxes, drag & drop
   editor.js    — everything after frames are loaded: step-by-step alignment
                  for 3+ frames, crop UI, live preview, adjustments, animation
-                 order, GIF/WebP export
-  lib/         — vendored gif.js + gif.worker.js (jnordberg/gif.js 0.2.0),
-                 no npm, no other dependencies
+                 order, GIF/WebP/MP4 export
+  lib/         — vendored gif.js + gif.worker.js (jnordberg/gif.js 0.2.0) and
+                 mp4-muxer.js (Vanilagy/mp4-muxer, MIT), no npm, no other
+                 dependencies
 run.sh         — serves web/ locally
 ```
 
@@ -93,7 +94,11 @@ the overlap, centered on the previous crop's center. Because both paths
 funnel through the same two functions, alignment drags, arrow-key nudges,
 and corner-handle resizes all keep a locked ratio correct automatically —
 there's no separate "is a ratio locked" branch anywhere else in the drag
-handlers.
+handlers. The fixed-ratio set (`CROP_RATIOS`) mixes classic photo ratios
+(1:1, 1:2, 2:1, 4:3, 3:2) with social-media aspect ratios (4:5 portrait,
+9:16 Stories/Reels/vertical video, 16:9 widescreen, 1.91:1 landscape link
+cards) — all just entries in the same width/height-ratio map, no separate
+code path for the newer ones.
 
 **2–10 frames, one array-based model — the 2-frame case is not special-cased
 separately, it just naturally degenerates to today's old behavior.**
@@ -226,14 +231,50 @@ profile) in its single-frame WebP output — `extractWebpImageChunks` uses an
 **allow-list** (`ALPH`/`VP8 `/`VP8L` only),
 not a block-list, when pulling image data out for the `ANMF` payload.
 
+**MP4 export uses WebCodecs to encode, a vendored muxer to contain — same
+split of labor as gif.js, different half of the problem.** Where the GIF
+path needed an encoder (gif.js supplies one; the browser has none) and the
+WebP path needed a *muxer* (browsers have a static encoder but no animated
+container writer), MP4 needs both, but the browser actually supplies the
+hard half: `VideoEncoder` (WebCodecs) does real H.264 encoding in native
+code. What's missing is only an MP4 container writer, so `lib/mp4-muxer.js`
+(vendored from `Vanilagy/mp4-muxer`, MIT-licensed, a single dependency-free
+browser build — same vendoring approach as gif.js, added via
+`<script src="lib/mp4-muxer.js">` for its `window.Mp4Muxer` global) takes
+each encoded chunk from `VideoEncoder`'s output callback and writes the
+`ftyp`/`moov`/`mdat` boxes. `generateMp4` in `editor.js` loops over
+`state.order` exactly like `generateGif`/`generateWebp` do, drawing each
+frame via the same shared `drawAdjustedFrame`, feeding it to the encoder as
+a `VideoFrame` at `timestamp/duration` set from the fps-derived delay (in
+microseconds, since that's the unit WebCodecs uses — everywhere else in the
+codebase, delay is milliseconds). **`MP4_CODEC_CANDIDATES` tries High
+profile before Baseline**: `VideoEncoder.isConfigSupported` depends on the
+actual output *resolution*, not just on what the browser supports in the
+abstract, and Baseline profile caps out at lower resolutions than real
+camera crops can hit — so `pickMp4Codec` probes candidates from most- to
+least-capable and uses the first one the current browser+resolution combo
+actually accepts, rather than hardcoding one codec string and letting large
+exports fail. **H.264 4:2:0 needs even width/height** — `generateOutput`
+trims one row/column off `computeOutputSize()`'s result when (and only
+when) `format === 'mp4'`, leaving the GIF/WebP canvas size untouched.
+Unlike the WebP case, this isn't a WebKit-only gap: WebCodecs' `VideoEncoder`
+is broadly supported (confirmed working via Playwright's `chromium` *and*
+`webkit` launchers — real Safari has shipped it since 16.4), so
+`generateMp4Btn` is feature-detected the same way `generateWebpBtn` is
+(`mp4Supported`, checked once via `VideoEncoder.isConfigSupported` at load)
+but is expected to actually stay enabled almost everywhere. The result
+`<img>` can't display a video, so `#output-video` is a separate `<video
+controls loop muted>` element that `generateOutput` shows/hides opposite
+`#output-gif` based on the returned `extension`.
+
 **Output scale is independent of crop.** The crop rect defines the *source*
 region in native pixels; the "Output scale" slider only changes the
 *destination* size frames are drawn into at export time (`computeOutputSize`).
 Dragging/resizing the crop never touches this.
 
 **No build step, on purpose.** Keep it a plain static site — if a dependency
-is needed, vendor its files into `web/lib/` (as done for gif.js) rather than
-introducing npm/bundlers.
+is needed, vendor its files into `web/lib/` (as done for gif.js and
+mp4-muxer.js) rather than introducing npm/bundlers.
 
 ## Testing
 

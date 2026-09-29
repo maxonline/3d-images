@@ -39,9 +39,11 @@
 
   const generateGifBtn = document.getElementById('generate-gif-btn');
   const generateWebpBtn = document.getElementById('generate-webp-btn');
+  const generateMp4Btn = document.getElementById('generate-mp4-btn');
   const editorEl = document.getElementById('editor');
   const outputEl = document.getElementById('output');
   const outputGif = document.getElementById('output-gif');
+  const outputVideo = document.getElementById('output-video');
   const downloadLink = document.getElementById('download-link');
 
   // WebKit (so every browser on iOS, regardless of name) has no animated-WebP
@@ -62,6 +64,34 @@
         if (!supported) {
           generateWebpBtn.title = "This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.";
         }
+        updateGenerateButtonsDisabled();
+      });
+  })();
+
+  // MP4 export needs WebCodecs (VideoEncoder) to encode H.264, which the
+  // vendored mp4-muxer library then wraps in an MP4 container — there's no
+  // built-in muxer either, same gap as the animated-WebP case above.
+  // WebCodecs is unavailable on older Safari/iOS and on Firefox without a
+  // flag, so this is detected once up front exactly like webpSupported.
+  let mp4Supported = true;
+  (function detectMp4Support() {
+    if (!window.VideoEncoder || !window.Mp4Muxer) {
+      mp4Supported = false;
+      generateMp4Btn.title = "This browser can't encode MP4 (needs WebCodecs) — use Generate GIF or WebP instead.";
+      updateGenerateButtonsDisabled();
+      return;
+    }
+    VideoEncoder.isConfigSupported({ codec: 'avc1.42001f', width: 64, height: 64, bitrate: 1e5 })
+      .then((result) => {
+        mp4Supported = !!(result && result.supported);
+        if (!mp4Supported) {
+          generateMp4Btn.title = "This browser can't encode H.264 — use Generate GIF or WebP instead.";
+        }
+        updateGenerateButtonsDisabled();
+      })
+      .catch(() => {
+        mp4Supported = false;
+        generateMp4Btn.title = "This browser can't encode MP4 — use Generate GIF or WebP instead.";
         updateGenerateButtonsDisabled();
       });
   })();
@@ -92,7 +122,10 @@
     '2:1': 2 / 1,
     '4:3': 4 / 3,
     '3:2': 3 / 2,
+    '4:5': 4 / 5,
+    '9:16': 9 / 16,
     '16:9': 16 / 9,
+    '1.91:1': 1.91 / 1,
   };
 
   const state = {
@@ -1027,6 +1060,7 @@
   function updateGenerateButtonsDisabled() {
     generateGifBtn.disabled = !orderValid;
     generateWebpBtn.disabled = !orderValid || !webpSupported;
+    generateMp4Btn.disabled = !orderValid || !mp4Supported;
   }
 
   // --- Animated WebP muxing ---
@@ -1185,9 +1219,78 @@
     return { blob: new Blob([animatedBytes], { type: 'image/webp' }), extension: 'webp' };
   }
 
+  // --- MP4 muxing ---
+  //
+  // Browsers expose an H.264 ENCODER via WebCodecs (VideoEncoder) but no
+  // built-in muxer to wrap the encoded chunks in an MP4 container — so
+  // mp4-muxer (vendored, MIT-licensed, github.com/Vanilagy/mp4-muxer) is
+  // used for that half, the same division of labor as gif.js (this app
+  // supplies the pixels/timing, the library supplies the container format).
+  // Candidates are tried High profile first (handles larger camera frame
+  // sizes) down to Baseline (the most broadly supported, but capped at
+  // smaller resolutions) since VideoEncoder.isConfigSupported depends on
+  // both the browser AND the actual output resolution, not just the browser.
+  const MP4_CODEC_CANDIDATES = ['avc1.640034', 'avc1.640028', 'avc1.4d0028', 'avc1.42001f'];
+
+  async function pickMp4Codec(width, height, bitrate) {
+    for (const codec of MP4_CODEC_CANDIDATES) {
+      try {
+        const result = await VideoEncoder.isConfigSupported({ codec, width, height, bitrate });
+        if (result && result.supported) return codec;
+      } catch (err) { /* try the next candidate */ }
+    }
+    return null;
+  }
+
+  async function generateMp4(canvas, delay) {
+    window.AppShared.setStatus('Encoding MP4…');
+    const ctx = canvas.getContext('2d');
+    const { width, height } = canvas;
+    const bitrate = Math.max(2_000_000, Math.round(width * height * 4));
+
+    const codec = await pickMp4Codec(width, height, bitrate);
+    if (!codec) {
+      throw new Error("This browser can't encode a video at this resolution — try a smaller Output scale, or use Generate GIF/WebP instead.");
+    }
+
+    const muxer = new Mp4Muxer.Muxer({
+      target: new Mp4Muxer.ArrayBufferTarget(),
+      video: { codec: 'avc', width, height },
+      fastStart: 'in-memory',
+    });
+
+    const videoEncoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (err) => console.error(err),
+    });
+    videoEncoder.configure({ codec, width, height, bitrate });
+
+    const durationMicros = delay * 1000;
+    let timestamp = 0;
+    for (let i = 0; i < state.order.length; i++) {
+      drawAdjustedFrame(ctx, state.order[i], 0, 0, width, height);
+      const videoFrame = new VideoFrame(canvas, { timestamp, duration: durationMicros });
+      videoEncoder.encode(videoFrame, { keyFrame: i === 0 });
+      videoFrame.close();
+      timestamp += durationMicros;
+      window.AppShared.setStatus(`Encoding MP4… ${Math.round(((i + 1) / state.order.length) * 100)}%`);
+    }
+
+    await videoEncoder.flush();
+    videoEncoder.close();
+    muxer.finalize();
+
+    return { blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }), extension: 'mp4' };
+  }
+
   async function generateOutput(format) {
     const delay = Math.round(1000 / state.fps);
-    const { w, h } = computeOutputSize();
+    let { w, h } = computeOutputSize();
+    // H.264 4:2:0 requires even dimensions; only MP4 needs this trim.
+    if (format === 'mp4') {
+      w -= w % 2;
+      h -= h % 2;
+    }
 
     const canvas = document.createElement('canvas');
     canvas.width = w;
@@ -1195,14 +1298,28 @@
 
     generateGifBtn.disabled = true;
     generateWebpBtn.disabled = true;
+    generateMp4Btn.disabled = true;
     try {
       const { blob, extension } = format === 'webp'
         ? await generateWebp(canvas, delay)
+        : format === 'mp4'
+        ? await generateMp4(canvas, delay)
         : await generateGif(canvas, delay);
 
       const url = URL.createObjectURL(blob);
       window.AppShared.trackObjectUrl(url);
-      outputGif.src = url;
+      if (extension === 'mp4') {
+        outputVideo.src = url;
+        outputVideo.hidden = false;
+        outputGif.hidden = true;
+        outputGif.removeAttribute('src');
+      } else {
+        outputVideo.pause();
+        outputVideo.removeAttribute('src');
+        outputVideo.hidden = true;
+        outputGif.hidden = false;
+        outputGif.src = url;
+      }
       downloadLink.href = url;
       downloadLink.download = `${state.baseName}.${extension}`;
       downloadLink.textContent = `Download ${extension.toUpperCase()}`;
@@ -1219,6 +1336,7 @@
 
   generateGifBtn.addEventListener('click', () => generateOutput('gif'));
   generateWebpBtn.addEventListener('click', () => generateOutput('webp'));
+  generateMp4Btn.addEventListener('click', () => generateOutput('mp4'));
 
   // --- Window resize ---
 

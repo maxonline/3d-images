@@ -215,7 +215,7 @@ h1 {
   margin: 0.5rem 0 0;
 }
 
-#generate-gif-btn, #generate-webp-btn {
+#generate-gif-btn, #generate-webp-btn, #generate-mp4-btn {
   padding: 0.5rem 1rem;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -226,11 +226,11 @@ h1 {
   cursor: pointer;
 }
 
-#generate-gif-btn:hover, #generate-webp-btn:hover {
+#generate-gif-btn:hover, #generate-webp-btn:hover, #generate-mp4-btn:hover {
   border-color: var(--accent);
 }
 
-#generate-gif-btn:disabled, #generate-webp-btn:disabled {
+#generate-gif-btn:disabled, #generate-webp-btn:disabled, #generate-mp4-btn:disabled {
   opacity: 0.6;
   cursor: default;
 }

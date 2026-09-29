@@ -65,7 +65,10 @@
         <label><input type="radio" name="crop-ratio" value="2:1"> 2:1</label>
         <label><input type="radio" name="crop-ratio" value="4:3"> 4:3</label>
         <label><input type="radio" name="crop-ratio" value="3:2"> 3:2</label>
+        <label><input type="radio" name="crop-ratio" value="4:5"> 4:5</label>
+        <label><input type="radio" name="crop-ratio" value="9:16"> 9:16</label>
         <label><input type="radio" name="crop-ratio" value="16:9"> 16:9</label>
+        <label><input type="radio" name="crop-ratio" value="1.91:1"> 1.91:1</label>
       </fieldset>
 
       <h2>Preview</h2>
@@ -121,6 +124,7 @@
       <div class="button-row">
         <button id="generate-gif-btn" type="button">Generate GIF</button>
         <button id="generate-webp-btn" type="button">Generate WebP</button>
+        <button id="generate-mp4-btn" type="button">Generate MP4</button>
       </div>
     </div>
   </section>
@@ -128,12 +132,14 @@
   <div class="output" id="output" hidden>
     <h2>Result <span class="hint-inline" id="result-size-label"></span></h2>
     <img id="output-gif" alt="Alternating output">
+    <video id="output-video" hidden muted loop playsinline controls></video>
     <br>
     <a id="download-link" download>Download GIF</a>
   </div>
 </main>
 
 <script src="lib/gif.js"></script>
+<script src="lib/mp4-muxer.js"></script>
 <script src="app.js" defer></script>
 <script src="editor.js" defer></script>
 </body>
