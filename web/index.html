@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>W3 Wiggle GIF Maker</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Fujifilm Real 3D W3 → Wiggle GIF</h1>
+  <p class="intro">Pick an .MPO file straight off the camera and get back an animated GIF that flips between the left and right stereo frames.</p>
+
+  <div id="drop-zone">
+    <p>Drag &amp; drop an .MPO file here, or click to choose one</p>
+    <input type="file" id="file-input" accept=".mpo,.jpg,.jpeg,image/*">
+  </div>
+
+  <div class="control-row">
+    <label for="fps-slider">Flip speed: <span id="fps-label">4</span> fps</label>
+    <input type="range" id="fps-slider" min="1" max="15" step="1" value="4">
+  </div>
+
+  <p id="status"></p>
+
+  <div class="previews" id="previews" hidden>
+    <div>
+      <h2>Left frame</h2>
+      <img id="preview-left" alt="Left frame">
+    </div>
+    <div>
+      <h2>Right frame</h2>
+      <img id="preview-right" alt="Right frame">
+    </div>
+  </div>
+
+  <div class="output" id="output" hidden>
+    <h2>Result</h2>
+    <img id="output-gif" alt="Alternating GIF">
+    <br>
+    <a id="download-link" download>Download GIF</a>
+  </div>
+</main>
+
+<script src="lib/gif.js"></script>
+<script src="app.js" defer></script>
+</body>
+</html>
