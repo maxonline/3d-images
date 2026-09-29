@@ -73,9 +73,26 @@ the visible canvas.
 
 **The crop rectangle is always clamped inside the overlap.** `state.crop`
 must stay within `computeOverlapRect(dx, dy, W, H)` — enforced by
-`clampCropToOverlap`/`clampMoveCrop`/`clampResizeCrop` after every
-alignment or crop change. `clampAlign` also prevents the overlap itself
-from shrinking below 30% of the frame in either axis.
+`clampCropToOverlap`/`clampResizeCrop` after every alignment or crop change.
+`clampAlign` also prevents the overlap itself from shrinking below 30% of
+the frame in either axis.
+
+**Crop aspect-ratio lock (`state.cropRatio`, the "Crop aspect ratio" radio
+group) reuses the same clamp functions rather than being a separate code
+path.** `clampResizeCrop` computes an anchor point (the corner opposite the
+one being dragged, which never moves) and a free-form candidate size from
+the raw drag, exactly as before; when a ratio is locked it then derives one
+dimension from the other via that ratio and scales both down uniformly
+(never independently — that would distort the ratio) to fit the available
+space from the anchor to the overlap edge. `clampCropToOverlap` and picking
+a new ratio both go through `fitCropToRatio`, which fits the largest
+ratio-matching rect that stays within the crop's *current* size (so locking
+a ratio never balloons the crop bigger than what was already selected) and
+the overlap, centered on the previous crop's center. Because both paths
+funnel through the same two functions, alignment drags, arrow-key nudges,
+and corner-handle resizes all keep a locked ratio correct automatically —
+there's no separate "is a ratio locked" branch anywhere else in the drag
+handlers.
 
 **One shared frame-drawing function, three consumers.** `drawAdjustedFrame`
 (crop → brightness/contrast/hue/grayscale/sepia via hand-rolled pixel math →

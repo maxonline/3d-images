@@ -129,7 +129,7 @@ h1 {
   white-space: nowrap;
 }
 
-.color-mode-group {
+.radio-group {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -139,14 +139,14 @@ h1 {
   border: 0;
 }
 
-.color-mode-group legend {
+.radio-group legend {
   width: 100%;
   padding: 0;
   margin-bottom: 0.25rem;
   font-weight: 600;
 }
 
-.color-mode-group label {
+.radio-group label {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;

@@ -45,6 +45,17 @@
       </div>
     </div>
 
+    <fieldset class="radio-group">
+      <legend>Crop aspect ratio</legend>
+      <label><input type="radio" name="crop-ratio" value="none" checked> Free</label>
+      <label><input type="radio" name="crop-ratio" value="1:1"> 1:1</label>
+      <label><input type="radio" name="crop-ratio" value="1:2"> 1:2</label>
+      <label><input type="radio" name="crop-ratio" value="2:1"> 2:1</label>
+      <label><input type="radio" name="crop-ratio" value="4:3"> 4:3</label>
+      <label><input type="radio" name="crop-ratio" value="3:2"> 3:2</label>
+      <label><input type="radio" name="crop-ratio" value="16:9"> 16:9</label>
+    </fieldset>
+
     <h2>Preview</h2>
     <p class="hint">This preview shows roughly what the GIF will look like.</p>
     <canvas id="preview-canvas"></canvas>
@@ -71,7 +82,7 @@
       <input type="number" id="hue-value" class="value-input" min="-180" max="180" step="1" value="0">
       <span class="unit">&deg;</span>
     </div>
-    <fieldset class="color-mode-group">
+    <fieldset class="radio-group">
       <legend>Color</legend>
       <label><input type="radio" name="color-mode" value="normal" checked> Normal</label>
       <label><input type="radio" name="color-mode" value="bw"> Black &amp; white</label>

@@ -17,6 +17,7 @@
   const hueSlider = document.getElementById('hue-slider');
   const hueValue = document.getElementById('hue-value');
   const colorModeRadios = document.querySelectorAll('input[name="color-mode"]');
+  const cropRatioRadios = document.querySelectorAll('input[name="crop-ratio"]');
 
   const fpsSlider = document.getElementById('fps-slider');
   const fpsValue = document.getElementById('fps-value');
@@ -71,6 +72,17 @@
   const TINT_RIGHT = 'rgba(40, 200, 255, 0.35)';
   const MAGNIFIER_ZOOM = 4; // how much more zoomed-in the loupe is vs native pixels
 
+  // Crop width:height ratio for each radio option; null ("none") means free-form.
+  const CROP_RATIOS = {
+    none: null,
+    '1:1': 1 / 1,
+    '1:2': 1 / 2,
+    '2:1': 2 / 1,
+    '4:3': 4 / 3,
+    '3:2': 3 / 2,
+    '16:9': 16 / 9,
+  };
+
   const state = {
     imgLeft: null,
     imgRight: null,
@@ -79,6 +91,7 @@
     baseName: 'wiggle',
     align: { dx: 0, dy: 0 },
     crop: { x: 0, y: 0, w: 0, h: 0 },
+    cropRatio: null, // locked width/height ratio, or null for free-form
     adjust: { brightness: 0, contrast: 0, hue: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
@@ -148,11 +161,41 @@
 
   function resetCropToOverlap() {
     const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
-    state.crop = { x: ov.x0, y: ov.y0, w: ov.w, h: ov.h };
+    state.crop = state.cropRatio
+      ? fitCropToRatio({ x: ov.x0, y: ov.y0, w: ov.w, h: ov.h }, state.cropRatio, ov)
+      : { x: ov.x0, y: ov.y0, w: ov.w, h: ov.h };
+  }
+
+  // Largest rect matching `ratio` (width/height) that (a) fits within `crop`'s
+  // current size — so locking a ratio never suddenly balloons the crop
+  // bigger than what was there — and (b) fits within the overlap `ov`,
+  // centered on `crop`'s center, clamped into `ov` if centering would push
+  // it outside.
+  function fitCropToRatio(crop, ratio, ov) {
+    let w = crop.w;
+    let h = w / ratio;
+    if (h > crop.h) {
+      h = crop.h;
+      w = h * ratio;
+    }
+
+    const scale = Math.min(1, ov.w / w, ov.h / h);
+    w = Math.max(MIN_CROP, w * scale);
+    h = Math.max(MIN_CROP, h * scale);
+
+    const cx = crop.x + crop.w / 2;
+    const cy = crop.y + crop.h / 2;
+    const x = Math.max(ov.x0, Math.min(cx - w / 2, ov.x1 - w));
+    const y = Math.max(ov.y0, Math.min(cy - h / 2, ov.y1 - h));
+    return { x, y, w, h };
   }
 
   function clampCropToOverlap() {
     const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+    if (state.cropRatio) {
+      state.crop = fitCropToRatio(state.crop, state.cropRatio, ov);
+      return;
+    }
     let { x, y, w, h } = state.crop;
     w = Math.max(Math.min(w, ov.w), Math.min(MIN_CROP, ov.w));
     h = Math.max(Math.min(h, ov.h), Math.min(MIN_CROP, ov.h));
@@ -161,30 +204,54 @@
     state.crop = { x, y, w, h };
   }
 
-  function clampResizeCrop(startCrop, handle, dx, dy) {
+  function clampResizeCrop(startCrop, handle, dx, dy, ratio) {
     const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
-    let { x, y, w, h } = startCrop;
-    const right = x + w;
-    const bottom = y + h;
+    const right = startCrop.x + startCrop.w;
+    const bottom = startCrop.y + startCrop.h;
 
-    if (handle === 'nw' || handle === 'sw') {
-      const newX = Math.max(ov.x0, Math.min(x + dx, right - MIN_CROP));
-      w = right - newX;
-      x = newX;
+    // The anchor is the corner opposite the one being dragged — it never
+    // moves, matching how a free-form resize already behaves per-handle.
+    const anchorX = (handle === 'nw' || handle === 'sw') ? right : startCrop.x;
+    const anchorY = (handle === 'nw' || handle === 'ne') ? bottom : startCrop.y;
+
+    let w = Math.abs(((handle === 'nw' || handle === 'sw') ? startCrop.x + dx : right + dx) - anchorX);
+    let h = Math.abs(((handle === 'nw' || handle === 'ne') ? startCrop.y + dy : bottom + dy) - anchorY);
+
+    if (ratio) {
+      // Drive the resize from whichever axis moved more (in raw drag
+      // pixels), so it tracks the dominant drag direction instead of
+      // always favoring one axis.
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        h = w / ratio;
+      } else {
+        w = h * ratio;
+      }
     }
-    if (handle === 'ne' || handle === 'se') {
-      const newRight = Math.min(ov.x1, Math.max(x + dx + w, x + MIN_CROP));
-      w = newRight - x;
+
+    w = Math.max(MIN_CROP, w);
+    h = Math.max(MIN_CROP, h);
+
+    // Available space from the anchor toward the overlap edge the drag is extending into.
+    const maxW = (handle === 'nw' || handle === 'sw') ? anchorX - ov.x0 : ov.x1 - anchorX;
+    const maxH = (handle === 'nw' || handle === 'ne') ? anchorY - ov.y0 : ov.y1 - anchorY;
+
+    if (ratio) {
+      // Scale both dimensions uniformly to fit, so the ratio is preserved exactly.
+      const scale = Math.min(1, maxW / w, maxH / h);
+      w *= scale;
+      h *= scale;
+      if (w < MIN_CROP || h < MIN_CROP) {
+        const growScale = Math.max(MIN_CROP / w, MIN_CROP / h);
+        w = Math.min(maxW, w * growScale);
+        h = Math.min(maxH, h * growScale);
+      }
+    } else {
+      w = Math.min(w, maxW);
+      h = Math.min(h, maxH);
     }
-    if (handle === 'nw' || handle === 'ne') {
-      const newY = Math.max(ov.y0, Math.min(y + dy, bottom - MIN_CROP));
-      h = bottom - newY;
-      y = newY;
-    }
-    if (handle === 'sw' || handle === 'se') {
-      const newBottom = Math.min(ov.y1, Math.max(y + dy + h, y + MIN_CROP));
-      h = newBottom - y;
-    }
+
+    const x = (handle === 'nw' || handle === 'sw') ? anchorX - w : anchorX;
+    const y = (handle === 'nw' || handle === 'ne') ? anchorY - h : anchorY;
     return { x, y, w, h };
   }
 
@@ -521,7 +588,7 @@
       // alignScale is intentionally NOT recomputed mid-drag so the
       // canvas-to-native ratio stays constant for the duration of the drag.
       const { dx, dy } = nativeDelta(alignCanvas, alignScale, state.drag.startClientX, state.drag.startClientY, e.clientX, e.clientY);
-      state.crop = clampResizeCrop(state.drag.startCrop, state.drag.handle, dx, dy);
+      state.crop = clampResizeCrop(state.drag.startCrop, state.drag.handle, dx, dy, state.cropRatio);
       drawAlignmentCanvas();
       updateOutputSizeLabel();
     }
@@ -660,6 +727,20 @@
   colorModeRadios.forEach((radio) => {
     radio.addEventListener('change', () => {
       if (radio.checked) state.adjust.colorMode = radio.value;
+    });
+  });
+
+  cropRatioRadios.forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      state.cropRatio = CROP_RATIOS[radio.value];
+      if (state.cropRatio) {
+        const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+        state.crop = fitCropToRatio(state.crop, state.cropRatio, ov);
+      }
+      recomputePreviewScale();
+      drawAlignmentCanvas();
+      updateOutputSizeLabel();
     });
   });
 
@@ -892,6 +973,8 @@
     applyHue(0);
     colorModeRadios.forEach((radio) => { radio.checked = radio.value === 'normal'; });
     state.adjust.colorMode = 'normal';
+    cropRatioRadios.forEach((radio) => { radio.checked = radio.value === 'none'; });
+    state.cropRatio = null;
 
     resetCropToOverlap();
     recomputeAlignScale();
