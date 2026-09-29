@@ -262,7 +262,38 @@ is broadly supported (confirmed working via Playwright's `chromium` *and*
 `webkit` launchers — real Safari has shipped it since 16.4), so
 `generateMp4Btn` is feature-detected the same way `generateWebpBtn` is
 (`mp4Supported`, checked once via `VideoEncoder.isConfigSupported` at load)
-but is expected to actually stay enabled almost everywhere. The result
+but is expected to actually stay enabled almost everywhere.
+
+**The `mp4Supported` detection call is wrapped in `try`/`catch`, and this
+was a real bug, not defensive-programming theater** — a report of the
+whole editor silently failing to appear after uploading 2 images on
+Android Firefox traced back to exactly this. `VideoEncoder.isConfigSupported`
+was called directly, guarded only by `.then()`/`.catch()` on its return
+value; a browser with `VideoEncoder` present but a broken/partial
+implementation (a real risk given how new/inconsistent WebCodecs support
+still is across engines) could throw *synchronously* instead of
+rejecting, and since this detection runs unconditionally at script-load
+time near the top of `editor.js`'s single top-level IIFE, an uncaught
+throw there aborts everything below it — including `window.Editor = ...`
+at the very bottom. `app.js`'s upload boxes are a separate script and
+kept working, so the file inputs looked fine right up until the moment
+`app.js` called the now-nonexistent `window.Editor.load(...)`. The WebP
+detection right above it never had this problem because `canvasToBlob()`
+wraps its work in a real `new Promise(...)` executor, which auto-converts
+any internal throw into a rejection — `VideoEncoder.isConfigSupported` is
+called directly with no such wrapper, so it needed its own `try`/`catch`.
+Fixing this surfaced a second, previously-unreachable bug in the same
+spot: the `catch` block calls `updateGenerateButtonsDisabled()`, which
+reads `orderValid` — originally declared via `let` much further down in
+the file, so hitting it from this now-synchronous catch path threw its
+own temporal-dead-zone error and broke the app the exact same way.
+`orderValid`'s declaration was moved above both detection blocks to fix
+that. If you add a third format needing its own up-front feature-detect,
+follow the WebP/Promise-executor pattern or wrap it in `try`/`catch` like
+this — never call a browser capability-detection API unguarded at
+top-level script-execution time.
+
+The result
 `<img>` can't display a video, so `#output-video` is a separate `<video
 controls loop muted>` element that `generateOutput` shows/hides opposite
 `#output-gif` based on the returned `extension`.
