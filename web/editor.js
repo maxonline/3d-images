@@ -280,6 +280,17 @@
     magnifierCtx.clearRect(0, 0, magnifierCanvas.width, magnifierCanvas.height);
   }
 
+  // Only show the magnifier while the align/crop canvas is actually
+  // selected (focused) — hovering over it without having clicked/tabbed
+  // into it first shouldn't pop up the zoom view.
+  function maybeDrawMagnifier(nativeX, nativeY) {
+    if (document.activeElement === alignCanvas) {
+      drawMagnifier(nativeX, nativeY);
+    } else {
+      hideMagnifier();
+    }
+  }
+
   function drawCropOverlay() {
     const { x, y, w, h } = state.crop;
     const topLeft = toAlignCanvasXY(x, y);
@@ -359,7 +370,7 @@
     drawAlignmentCanvas();
     updateOffsetLabel();
     updateOutputSizeLabel();
-    if (lastHoverNative) drawMagnifier(lastHoverNative.x, lastHoverNative.y);
+    if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
   }
 
   alignCanvas.addEventListener('pointerdown', (e) => {
@@ -394,7 +405,7 @@
   alignCanvas.addEventListener('pointermove', (e) => {
     const { x: cx, y: cy } = clientToCanvasXY(alignCanvas, e.clientX, e.clientY);
     lastHoverNative = fromAlignCanvasXY(cx, cy);
-    drawMagnifier(lastHoverNative.x, lastHoverNative.y);
+    maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
 
     if (!state.drag) {
       updateAlignHoverCursor(e.clientX, e.clientY);
@@ -423,6 +434,10 @@
   alignCanvas.addEventListener('pointerleave', (e) => {
     if (state.drag) return; // pointer capture keeps a drag going even once the cursor visually leaves
     lastHoverNative = null;
+    hideMagnifier();
+  });
+
+  alignCanvas.addEventListener('blur', () => {
     hideMagnifier();
   });
 
@@ -455,7 +470,7 @@
     drawAlignmentCanvas();
     updateOffsetLabel();
     updateOutputSizeLabel();
-    if (lastHoverNative) drawMagnifier(lastHoverNative.x, lastHoverNative.y);
+    if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
   });
 
   // --- Live preview animation loop (read-only mimic of the final GIF) ---
