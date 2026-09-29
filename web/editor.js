@@ -1,7 +1,6 @@
 (function () {
   const alignCanvas = document.getElementById('align-canvas');
   const alignCtx = alignCanvas.getContext('2d');
-  const resetAlignBtn = document.getElementById('reset-align-btn');
 
   const previewCanvas = document.getElementById('preview-canvas');
   const previewCtx = previewCanvas.getContext('2d');
@@ -737,20 +736,6 @@
     nudgeAlign(step[0], step[1]);
   });
 
-  resetAlignBtn.addEventListener('click', () => {
-    const f = state.frames[activeAlignFrameIndex()];
-    f.dx = 0;
-    f.dy = 0;
-    if (state.mode === 'ready') {
-      clampCropToOverlap();
-      recomputePreviewScale();
-    }
-    drawAlignmentCanvas();
-    updateOffsetLabel();
-    if (state.mode === 'ready') updateOutputSizeLabel();
-    if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
-  });
-
   // --- Frame selection for 3+ frames ---
   //
   // No wizard buttons: every non-anchor frame's thumbnail is directly
@@ -793,11 +778,6 @@
         badge.textContent = 'Not aligned';
         imgWrap.appendChild(badge);
 
-        const arrow = document.createElement('span');
-        arrow.className = 'thumb-arrow';
-        arrow.textContent = '↓'; // downward arrow, pointing at the suggested-next thumbnail
-        imgWrap.appendChild(arrow);
-
         wrap.addEventListener('click', () => selectFrame(i));
       }
 
@@ -814,11 +794,9 @@
 
   function updateThumbnailStripState() {
     if (frameCount() <= 2) return;
-    const nextSuggested = state.frames.findIndex((f, i) => i > 0 && !state.alignStep.confirmed[i]);
     Array.from(thumbStripEl.children).forEach((el, i) => {
       el.classList.toggle('confirmed', !!state.alignStep.confirmed[i]);
       el.classList.toggle('active', i === state.alignStep.current);
-      el.classList.toggle('suggested-next', i === nextSuggested);
     });
   }
 
@@ -1288,7 +1266,10 @@
     if (frameCount() > 2) {
       state.mode = 'stepping';
       state.alignStep.current = 1;
-      state.alignStep.confirmed = state.frames.map((_, i) => i === 0);
+      // Frame 1 (index 1) starts out already selected — treat it as if it
+      // had already been clicked, same as frame 0 the anchor, so it shows
+      // no "Not aligned" badge from the very first render.
+      state.alignStep.confirmed = state.frames.map((_, i) => i === 0 || i === 1);
       refreshAfterFrameSelection();
     } else {
       state.alignStep.current = 1;

@@ -111,21 +111,32 @@ condition that keeps every new UI section (thumbnail strip, animation-order
 box) permanently hidden via `applyModeVisibility()`.
 
 **Click-to-select alignment for 3+ frames (`state.mode`: `'stepping'` |
-`'ready'`) — no wizard buttons, frames can be aligned in any order.**
-Every non-anchor frame gets a clickable thumbnail (`renderThumbnailStrip`);
-clicking one (`selectFrame(index)`) makes it the active frame on the align
-canvas AND immediately marks it confirmed — a frame left at its default
-`{0,0}` offset is a valid confirmation, no drag required, and there's no
-separate "Confirm" step. Frames not yet confirmed show a "Not aligned" text
-badge over their thumbnail (`.thumb-badge`, CSS-driven by the absence of the
-`.confirmed` class); the lowest-indexed unconfirmed non-anchor frame gets a
-small arrow (`.suggested-next`) as a hint, but clicking any other pending
-thumbnail works too — `state.alignStep.current` is just "whichever frame was
-clicked most recently," not a strict sequence position. The crop/preview/
-export UI (`#crop-export-panel`) unlocks the *first* time every frame has
-been confirmed at least once (`state.mode` flips to `'ready'` inside
-`enterReadyMode()`, called from `selectFrame`) and **stays unlocked
-permanently** — clicking a thumbnail again later (even one already
+`'ready'`) — no wizard buttons, no reset button, frames can be aligned in any
+order.** The thumbnail strip (`#frame-thumb-section`) sits directly above the
+align canvas, right after `#align-hint`. Every non-anchor frame gets a
+clickable thumbnail (`renderThumbnailStrip`); clicking one
+(`selectFrame(index)`) makes it the active frame on the align canvas AND
+immediately marks it confirmed — a frame left at its default `{0,0}` offset
+is a valid confirmation, no drag required, and there's no separate "Confirm"
+step. Frame 0 (the anchor) is never rendered as clickable — no thumbnail
+click handler is attached to it at all. Frames not yet confirmed show a "Not
+aligned" text badge over their thumbnail (`.thumb-badge`, CSS-driven by the
+absence of the `.confirmed` class); the currently-active thumbnail gets a
+visibly thicker border plus an accent box-shadow ring (`.thumb.active
+.thumb-img`) so the selection is unambiguous at a glance. On initial load
+with 3+ frames, frame index 1 starts pre-selected *and* pre-confirmed (`load()`
+seeds `state.alignStep.confirmed` with both index 0 and index 1 true, and
+`state.alignStep.current = 1`), so it shows no "Not aligned" badge from the
+very first render — exactly as if it had already been clicked. There is no
+dedicated "reset alignment" control: since any frame (including ones already
+confirmed) can be reselected and redragged at any time via its thumbnail,
+a separate reset-to-zero button would be redundant.
+`state.alignStep.current` is just "whichever frame was selected most
+recently," not a strict sequence position — frames can be confirmed in any
+order. The crop/preview/export UI (`#crop-export-panel`) unlocks the *first*
+time every frame has been confirmed at least once (`state.mode` flips to
+`'ready'` inside `enterReadyMode()`, called from `selectFrame`) and **stays
+unlocked permanently** — clicking a thumbnail again later (even one already
 confirmed) just reselects it for further dragging via
 `refreshAfterFrameSelection()`, without re-hiding the crop panel or
 resetting the crop/order/adjustments `enterReadyMode()` already set up.
