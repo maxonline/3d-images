@@ -33,6 +33,28 @@
   const outputGif = document.getElementById('output-gif');
   const downloadLink = document.getElementById('download-link');
 
+  // WebKit (so every browser on iOS, regardless of name) has no animated-WebP
+  // encoder and its canvas.toBlob('image/webp', ...) silently falls back to
+  // PNG rather than erroring. Detect that once up front and disable the
+  // button with an explanation, instead of letting someone wait through a
+  // full export only to hit an error at the very end.
+  let webpSupported = true;
+  (function detectWebpSupport() {
+    const c = document.createElement('canvas');
+    c.width = 1;
+    c.height = 1;
+    canvasToBlob(c, 'image/webp', 0.8)
+      .then((blob) => blob.type === 'image/webp')
+      .catch(() => false)
+      .then((supported) => {
+        webpSupported = supported;
+        if (!supported) {
+          generateWebpBtn.disabled = true;
+          generateWebpBtn.title = "This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.";
+        }
+      });
+  })();
+
   const ALIGN_DISPLAY_MAX_W = 760;
   const ALIGN_DISPLAY_MAX_H = 560;
   // Extra native-pixel space drawn around the images on the align canvas, so
@@ -189,6 +211,78 @@
       : { sx: crop.x - dx, sy: crop.y - dy, sw: crop.w, sh: crop.h };
   }
 
+  function clamp255(v) {
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+
+  // Applies brightness/contrast/hue-rotate/grayscale/sepia to an ImageData
+  // in place, by hand — NOT via ctx.filter. WebKit (Safari, and therefore
+  // every iOS browser regardless of name, since Apple requires them all to
+  // use its engine) silently ignores CanvasRenderingContext2D.filter: no
+  // error, no effect, images just draw unmodified. getImageData/putImageData
+  // has no such gap on any engine, so doing the math ourselves is the only
+  // reliable cross-browser way to apply these adjustments.
+  //
+  // The formulas match the CSS Filter Effects spec exactly (same brightness/
+  // contrast/hue-rotate/grayscale/sepia this used to delegate to via
+  // ctx.filter), so results are visually identical on browsers where the
+  // native filter would have worked anyway.
+  function applyPixelAdjustments(imageData, brightness, contrast, hueDeg, colorMode) {
+    const data = imageData.data;
+    const b = 1 + brightness / 100; // 0..2
+    const c = 1 + contrast / 100; // 0..2
+    const hueRad = (hueDeg * Math.PI) / 180;
+    const cosH = Math.cos(hueRad);
+    const sinH = Math.sin(hueRad);
+    const applyHue = hueDeg % 360 !== 0;
+
+    // SVG/CSS feColorMatrix "hueRotate" luminance-preserving rotation matrix.
+    const m00 = 0.213 + cosH * 0.787 - sinH * 0.213;
+    const m01 = 0.715 - cosH * 0.715 - sinH * 0.715;
+    const m02 = 0.072 - cosH * 0.072 + sinH * 0.928;
+    const m10 = 0.213 - cosH * 0.213 + sinH * 0.143;
+    const m11 = 0.715 + cosH * 0.285 + sinH * 0.14;
+    const m12 = 0.072 - cosH * 0.072 - sinH * 0.283;
+    const m20 = 0.213 - cosH * 0.213 - sinH * 0.787;
+    const m21 = 0.715 - cosH * 0.715 + sinH * 0.715;
+    const m22 = 0.072 + cosH * 0.928 + sinH * 0.072;
+
+    for (let i = 0; i < data.length; i += 4) {
+      let r = data[i] * b;
+      let g = data[i + 1] * b;
+      let bch = data[i + 2] * b;
+
+      r = clamp255((r - 128) * c + 128);
+      g = clamp255((g - 128) * c + 128);
+      bch = clamp255((bch - 128) * c + 128);
+
+      if (applyHue) {
+        const nr = m00 * r + m01 * g + m02 * bch;
+        const ng = m10 * r + m11 * g + m12 * bch;
+        const nb = m20 * r + m21 * g + m22 * bch;
+        r = nr;
+        g = ng;
+        bch = nb;
+      }
+
+      if (colorMode === 'bw') {
+        const gray = 0.2126 * r + 0.7152 * g + 0.0722 * bch;
+        r = g = bch = gray;
+      } else if (colorMode === 'sepia') {
+        const sr = 0.393 * r + 0.769 * g + 0.189 * bch;
+        const sg = 0.349 * r + 0.686 * g + 0.168 * bch;
+        const sb = 0.272 * r + 0.534 * g + 0.131 * bch;
+        r = sr;
+        g = sg;
+        bch = sb;
+      }
+
+      data[i] = clamp255(r);
+      data[i + 1] = clamp255(g);
+      data[i + 2] = clamp255(bch);
+    }
+  }
+
   // Draws one adjusted/cropped/tinted frame into destCtx. Used by both the
   // live preview loop and the final full-resolution GIF export, so the two
   // can never drift apart.
@@ -196,15 +290,17 @@
     const img = which === 'left' ? state.imgLeft : state.imgRight;
     const { sx, sy, sw, sh } = sourceRectFor(which, state.crop, state.align.dx, state.align.dy);
 
-    destCtx.save();
-    const b = 1 + state.adjust.brightness / 100;
-    const c = 1 + state.adjust.contrast / 100;
-    let filter = `brightness(${b}) contrast(${c}) hue-rotate(${state.adjust.hue}deg)`;
-    if (state.adjust.colorMode === 'bw') filter += ' grayscale(1)';
-    if (state.adjust.colorMode === 'sepia') filter += ' sepia(1)';
-    destCtx.filter = filter;
     destCtx.drawImage(img, sx, sy, sw, sh, destX, destY, destW, destH);
-    destCtx.restore();
+
+    const needsPixelAdjust = state.adjust.brightness !== 0 || state.adjust.contrast !== 0 ||
+      state.adjust.hue !== 0 || state.adjust.colorMode === 'bw' || state.adjust.colorMode === 'sepia';
+    if (needsPixelAdjust) {
+      const w = Math.max(1, Math.round(destW));
+      const h = Math.max(1, Math.round(destH));
+      const imageData = destCtx.getImageData(destX, destY, w, h);
+      applyPixelAdjustments(imageData, state.adjust.brightness, state.adjust.contrast, state.adjust.hue, state.adjust.colorMode);
+      destCtx.putImageData(imageData, destX, destY);
+    }
 
     if (state.adjust.colorMode === 'anaglyph') {
       destCtx.save();
@@ -712,7 +808,7 @@
     drawAdjustedFrame(ctx, 'left', 0, 0, canvas.width, canvas.height);
     const leftBlob = await canvasToBlob(canvas, 'image/webp', WEBP_QUALITY);
     if (leftBlob.type !== 'image/webp') {
-      throw new Error('This browser does not support encoding WebP images.');
+      throw new Error("This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.");
     }
     const leftBytes = new Uint8Array(await leftBlob.arrayBuffer());
 
@@ -757,7 +853,7 @@
       window.AppShared.setStatus(err.message || 'Something went wrong generating the output.', true);
     } finally {
       generateGifBtn.disabled = false;
-      generateWebpBtn.disabled = false;
+      generateWebpBtn.disabled = !webpSupported;
     }
   }
 

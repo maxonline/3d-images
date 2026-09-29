@@ -78,20 +78,48 @@ alignment or crop change. `clampAlign` also prevents the overlap itself
 from shrinking below 30% of the frame in either axis.
 
 **One shared frame-drawing function, three consumers.** `drawAdjustedFrame`
-(crop → `ctx.filter` brightness/contrast/hue → optional red/cyan anaglyph
-tint via `multiply` composite) is called by the live preview loop, and by
-both `generateGif`/`generateWebp` at full export resolution. This guarantees
-the preview never drifts from the actual exported file.
+(crop → brightness/contrast/hue/grayscale/sepia via hand-rolled pixel math →
+optional red/cyan anaglyph tint via `multiply` composite) is called by the
+live preview loop, and by both `generateGif`/`generateWebp` at full export
+resolution. This guarantees the preview never drifts from the actual
+exported file.
 
-**Animated WebP is hand-muxed, not WASM-encoded.** Browsers only expose a
-*static* single-frame WebP encoder (`canvas.toBlob(..., 'image/webp')`) —
-there's no built-in animated-WebP API. `editor.js` encodes each frame
-separately via `canvas.toBlob`, then hand-builds a minimal RIFF container
-(`VP8X` + `ANIM` + one `ANMF` chunk per frame) to mux them into a real
-animated WebP, the same "read/write a binary container format by hand"
-approach as the MPO splitter. One gotcha already hit once: Chrome embeds
-extra chunks (e.g. `ICCP` color profile) in its single-frame WebP output —
-`extractWebpImageChunks` uses an **allow-list** (`ALPH`/`VP8 `/`VP8L` only),
+**Adjustments are manual pixel math, not `ctx.filter` — this was a real bug,
+not a style choice.** It used to build a `ctx.filter = 'brightness(...)
+contrast(...) hue-rotate(...)'` string and let the canvas apply it. That
+works on Chromium/Firefox but is silently a complete no-op on WebKit — every
+browser on iOS, since Apple requires them all to use Safari's engine
+regardless of name (confirmed with Playwright's `webkit` browser: setting
+`ctx.filter` and drawing produces byte-identical pixels to not setting it at
+all, no error, nothing in the console). `applyPixelAdjustments` reimplements
+brightness/contrast/hue-rotate/grayscale/sepia by hand via `getImageData`/
+`putImageData`, matching the CSS Filter Effects spec's formulas exactly
+(including the hue-rotate rotation matrix), so results look identical on
+engines where the native filter would've worked anyway. The anaglyph tint's
+`globalCompositeOperation = 'multiply'` was verified working fine on WebKit
+and was left as-is — only the `ctx.filter`-dependent parts needed replacing.
+If you touch this code, verify with `npx playwright install webkit` and the
+`webkit` launcher, not just Chromium — this bug produced zero errors and
+looked completely fine there.
+
+**WebP export is fundamentally unavailable on WebKit, not just buggy.**
+`canvas.toBlob(..., 'image/webp')` silently returns a PNG blob instead of
+throwing there — no per-frame encode ever happens, and there's no client-side
+fix (WebKit has no WebP encoder to call into; writing one from scratch is a
+real video codec, far out of scope). `editor.js` feature-detects this once
+on load and disables the "Generate WebP" button with an explanatory `title`
+rather than letting someone wait through a full export to hit an error.
+
+**Animated WebP is hand-muxed, not WASM-encoded** (on engines that do
+support the static encoder). Browsers only expose a *static* single-frame
+WebP encoder (`canvas.toBlob(..., 'image/webp')`) — there's no built-in
+animated-WebP API. `editor.js` encodes each frame separately via
+`canvas.toBlob`, then hand-builds a minimal RIFF container (`VP8X` + `ANIM` +
+one `ANMF` chunk per frame) to mux them into a real animated WebP, the same
+"read/write a binary container format by hand" approach as the MPO splitter.
+One gotcha already hit once: Chrome embeds extra chunks (e.g. `ICCP` color
+profile) in its single-frame WebP output — `extractWebpImageChunks` uses an
+**allow-list** (`ALPH`/`VP8 `/`VP8L` only),
 not a block-list, when pulling image data out for the `ANMF` payload.
 
 **Output scale is independent of crop.** The crop rect defines the *source*
