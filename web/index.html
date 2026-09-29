@@ -16,92 +16,126 @@
     <input type="file" id="file-input" accept=".mpo,.jpg,.jpeg,image/*">
   </div>
 
-  <p class="or-divider">or upload two separate JPEGs</p>
+  <p class="or-divider">or upload separate JPEGs (2&ndash;10 frames)</p>
 
-  <div class="dual-drop-row">
+  <div class="dual-drop-row" id="dual-drop-row">
     <div class="drop-zone drop-zone-small" id="left-drop-zone">
-      <p>Left image<br><span class="file-name"></span></p>
+      <p>Frame 1<br><span class="file-name"></span></p>
       <input type="file" id="left-file-input" accept=".jpg,.jpeg,image/*">
     </div>
     <div class="drop-zone drop-zone-small" id="right-drop-zone">
-      <p>Right image<br><span class="file-name"></span></p>
+      <p>Frame 2<br><span class="file-name"></span></p>
       <input type="file" id="right-file-input" accept=".jpg,.jpeg,image/*">
     </div>
   </div>
 
+  <template id="frame-drop-zone-template">
+    <div class="drop-zone drop-zone-small">
+      <p><span class="frame-label"></span><br><span class="file-name"></span></p>
+      <input type="file" class="frame-file-input" accept=".jpg,.jpeg,image/*">
+    </div>
+  </template>
+
   <p id="status"></p>
 
   <section id="editor" hidden>
+    <section id="frame-thumb-section" hidden>
+      <h2>Frames</h2>
+      <div class="thumb-strip" id="thumb-strip"></div>
+    </section>
+
     <h2>Align &amp; crop</h2>
     <p class="hint">Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.</p>
+
+    <div id="align-step-controls" hidden>
+      <p class="hint">Aligning frame <strong id="align-step-frame-num"></strong> of <strong id="align-step-total"></strong>.</p>
+      <div class="button-row">
+        <button id="align-back-btn" type="button">Back</button>
+        <button id="align-confirm-btn" type="button">Confirm &amp; next</button>
+      </div>
+    </div>
+
+    <div id="align-edit-link-row" hidden>
+      <button id="edit-alignment-btn" type="button" class="link-button">Edit alignment</button>
+    </div>
+
     <div class="align-row">
       <div class="align-main">
         <canvas id="align-canvas" tabindex="0" aria-label="Alignment and crop editor"></canvas>
         <button id="reset-align-btn" type="button">Reset alignment</button>
       </div>
-      <div class="align-magnifier">
+      <div class="align-magnifier" id="align-magnifier-col">
         <canvas id="magnifier-canvas" width="320" height="320" aria-label="Zoomed view under cursor"></canvas>
         <p class="hint" id="align-offset-label">Offset: 0, 0 px</p>
       </div>
     </div>
 
-    <fieldset class="radio-group">
-      <legend>Crop aspect ratio</legend>
-      <label><input type="radio" name="crop-ratio" value="none" checked> Free</label>
-      <label><input type="radio" name="crop-ratio" value="1:1"> 1:1</label>
-      <label><input type="radio" name="crop-ratio" value="1:2"> 1:2</label>
-      <label><input type="radio" name="crop-ratio" value="2:1"> 2:1</label>
-      <label><input type="radio" name="crop-ratio" value="4:3"> 4:3</label>
-      <label><input type="radio" name="crop-ratio" value="3:2"> 3:2</label>
-      <label><input type="radio" name="crop-ratio" value="16:9"> 16:9</label>
-    </fieldset>
+    <div id="crop-export-panel" hidden>
+      <fieldset class="radio-group">
+        <legend>Crop aspect ratio</legend>
+        <label><input type="radio" name="crop-ratio" value="none" checked> Free</label>
+        <label><input type="radio" name="crop-ratio" value="1:1"> 1:1</label>
+        <label><input type="radio" name="crop-ratio" value="1:2"> 1:2</label>
+        <label><input type="radio" name="crop-ratio" value="2:1"> 2:1</label>
+        <label><input type="radio" name="crop-ratio" value="4:3"> 4:3</label>
+        <label><input type="radio" name="crop-ratio" value="3:2"> 3:2</label>
+        <label><input type="radio" name="crop-ratio" value="16:9"> 16:9</label>
+      </fieldset>
 
-    <h2>Preview</h2>
-    <p class="hint">This preview shows roughly what the GIF will look like.</p>
-    <canvas id="preview-canvas"></canvas>
+      <h2>Preview</h2>
+      <p class="hint">This preview shows roughly what the GIF will look like.</p>
+      <canvas id="preview-canvas"></canvas>
 
-    <div class="control-row">
-      <label for="fps-slider">Flip speed</label>
-      <input type="range" id="fps-slider" min="1" max="30" step="1" value="8">
-      <input type="number" id="fps-value" class="value-input" min="1" max="30" step="1" value="8">
-      <span class="unit">fps</span>
-    </div>
-    <div class="control-row">
-      <label for="brightness-slider">Brightness</label>
-      <input type="range" id="brightness-slider" min="-100" max="100" step="1" value="0">
-      <input type="number" id="brightness-value" class="value-input" min="-100" max="100" step="1" value="0">
-    </div>
-    <div class="control-row">
-      <label for="contrast-slider">Contrast</label>
-      <input type="range" id="contrast-slider" min="-100" max="100" step="1" value="0">
-      <input type="number" id="contrast-value" class="value-input" min="-100" max="100" step="1" value="0">
-    </div>
-    <div class="control-row">
-      <label for="hue-slider">Hue</label>
-      <input type="range" id="hue-slider" min="-180" max="180" step="1" value="0">
-      <input type="number" id="hue-value" class="value-input" min="-180" max="180" step="1" value="0">
-      <span class="unit">&deg;</span>
-    </div>
-    <fieldset class="radio-group">
-      <legend>Color</legend>
-      <label><input type="radio" name="color-mode" value="normal" checked> Normal</label>
-      <label><input type="radio" name="color-mode" value="bw"> Black &amp; white</label>
-      <label><input type="radio" name="color-mode" value="sepia"> Sepia</label>
-      <label><input type="radio" name="color-mode" value="anaglyph"> Anaglyph tint (red/cyan)</label>
-    </fieldset>
+      <div class="control-row">
+        <label for="fps-slider">Flip speed</label>
+        <input type="range" id="fps-slider" min="1" max="30" step="1" value="8">
+        <input type="number" id="fps-value" class="value-input" min="1" max="30" step="1" value="8">
+        <span class="unit">fps</span>
+      </div>
+      <div class="control-row">
+        <label for="brightness-slider">Brightness</label>
+        <input type="range" id="brightness-slider" min="-100" max="100" step="1" value="0">
+        <input type="number" id="brightness-value" class="value-input" min="-100" max="100" step="1" value="0">
+      </div>
+      <div class="control-row">
+        <label for="contrast-slider">Contrast</label>
+        <input type="range" id="contrast-slider" min="-100" max="100" step="1" value="0">
+        <input type="number" id="contrast-value" class="value-input" min="-100" max="100" step="1" value="0">
+      </div>
+      <div class="control-row">
+        <label for="hue-slider">Hue</label>
+        <input type="range" id="hue-slider" min="-180" max="180" step="1" value="0">
+        <input type="number" id="hue-value" class="value-input" min="-180" max="180" step="1" value="0">
+        <span class="unit">&deg;</span>
+      </div>
+      <fieldset class="radio-group">
+        <legend>Color</legend>
+        <label><input type="radio" name="color-mode" value="normal" checked> Normal</label>
+        <label><input type="radio" name="color-mode" value="bw"> Black &amp; white</label>
+        <label><input type="radio" name="color-mode" value="sepia"> Sepia</label>
+        <label><input type="radio" name="color-mode" value="anaglyph"> Anaglyph tint (red/cyan)</label>
+      </fieldset>
 
-    <h2>Export</h2>
-    <div class="control-row">
-      <label for="scale-slider">Output scale</label>
-      <input type="range" id="scale-slider" min="10" max="100" step="1" value="100">
-      <input type="number" id="scale-value" class="value-input" min="10" max="100" step="1" value="100">
-      <span class="unit">%</span>
-    </div>
-    <p class="hint" id="output-size-label">Output size: —</p>
+      <div id="order-section" hidden>
+        <h2>Animation order</h2>
+        <p class="hint">Comma-separated frame numbers (1&ndash;N), e.g. "1,2,3,4,3,2". Defaults to a pendulum bounce.</p>
+        <input type="text" id="order-input" class="order-input">
+        <p class="hint error-hint" id="order-error" hidden></p>
+      </div>
 
-    <div class="button-row">
-      <button id="generate-gif-btn" type="button">Generate GIF</button>
-      <button id="generate-webp-btn" type="button">Generate WebP</button>
+      <h2>Export</h2>
+      <div class="control-row">
+        <label for="scale-slider">Output scale</label>
+        <input type="range" id="scale-slider" min="10" max="100" step="1" value="100">
+        <input type="number" id="scale-value" class="value-input" min="10" max="100" step="1" value="100">
+        <span class="unit">%</span>
+      </div>
+      <p class="hint" id="output-size-label">Output size: —</p>
+
+      <div class="button-row">
+        <button id="generate-gif-btn" type="button">Generate GIF</button>
+        <button id="generate-webp-btn" type="button">Generate WebP</button>
+      </div>
     </div>
   </section>
 

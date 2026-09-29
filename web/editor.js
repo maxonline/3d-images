@@ -9,6 +9,25 @@
   const magnifierCanvas = document.getElementById('magnifier-canvas');
   const magnifierCtx = magnifierCanvas.getContext('2d');
   const alignOffsetLabel = document.getElementById('align-offset-label');
+  const alignMagnifierColEl = document.getElementById('align-magnifier-col');
+
+  const frameThumbSectionEl = document.getElementById('frame-thumb-section');
+  const thumbStripEl = document.getElementById('thumb-strip');
+
+  const alignStepControlsEl = document.getElementById('align-step-controls');
+  const alignStepFrameNumEl = document.getElementById('align-step-frame-num');
+  const alignStepTotalEl = document.getElementById('align-step-total');
+  const alignBackBtn = document.getElementById('align-back-btn');
+  const alignConfirmBtn = document.getElementById('align-confirm-btn');
+
+  const alignEditLinkRowEl = document.getElementById('align-edit-link-row');
+  const editAlignmentBtn = document.getElementById('edit-alignment-btn');
+
+  const cropExportPanelEl = document.getElementById('crop-export-panel');
+
+  const orderSectionEl = document.getElementById('order-section');
+  const orderInput = document.getElementById('order-input');
+  const orderErrorEl = document.getElementById('order-error');
 
   const brightnessSlider = document.getElementById('brightness-slider');
   const brightnessValue = document.getElementById('brightness-value');
@@ -50,9 +69,9 @@
       .then((supported) => {
         webpSupported = supported;
         if (!supported) {
-          generateWebpBtn.disabled = true;
           generateWebpBtn.title = "This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.";
         }
+        updateGenerateButtonsDisabled();
       });
   })();
 
@@ -71,6 +90,8 @@
   const TINT_LEFT = 'rgba(255, 40, 40, 0.35)';
   const TINT_RIGHT = 'rgba(40, 200, 255, 0.35)';
   const MAGNIFIER_ZOOM = 4; // how much more zoomed-in the loupe is vs native pixels
+  const MAX_FRAMES = 10;
+  const MAX_ORDER_LENGTH = 100;
 
   // Crop width:height ratio for each radio option; null ("none") means free-form.
   const CROP_RATIOS = {
@@ -84,25 +105,47 @@
   };
 
   const state = {
-    imgLeft: null,
-    imgRight: null,
-    W: 0,
-    H: 0,
+    frames: [],   // [{ img: HTMLImageElement, dx: number, dy: number }], length 2..10.
+                  // frames[0].dx/dy are ALWAYS {0,0} — the fixed anchor. Every other frame's
+                  // dx/dy is its offset relative to frame 0, in native px.
+    W: 0, H: 0,   // native px, taken from frames[0]
     baseName: 'wiggle',
-    align: { dx: 0, dy: 0 },
     crop: { x: 0, y: 0, w: 0, h: 0 },
     cropRatio: null, // locked width/height ratio, or null for free-form
     adjust: { brightness: 0, contrast: 0, hue: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
+
+    order: [], // 0-indexed frame-index sequence driving preview + export
+
+    mode: 'ready', // 'stepping' | 'ready'. Always 'ready' when frames.length === 2.
+    alignStep: {
+      current: 1,     // 1-indexed slot being aligned now (frames[current] dragged against
+                       // frames[0..current-1]). Ranges 1..N-1.
+      confirmed: [],   // boolean[N]; confirmed[0] always true (anchor).
+    },
+
     drag: null,
     previewRAF: null,
     previewElapsed: 0,
-    previewShowingLeft: true,
+    previewOrderIdx: 0, // index into state.order
   };
 
+  let orderValid = true; // gates Generate buttons independently of webpSupported
   let alignScale = 1;
   let previewScale = 1;
+
+  function frameCount() {
+    return state.frames.length;
+  }
+
+  function alignDragEnabled() {
+    return state.mode === 'stepping' || frameCount() === 2;
+  }
+
+  function activeAlignFrameIndex() {
+    return state.mode === 'stepping' ? state.alignStep.current : 1;
+  }
 
   function computeScale(canvasEl, nativeW, nativeH, maxW, maxH) {
     const scale = Math.min(1, maxW / nativeW, maxH / nativeH);
@@ -142,12 +185,30 @@
     return { dx: (cur.x - start.x) / scale, dy: (cur.y - start.y) / scale };
   }
 
-  function computeOverlapRect(dx, dy, W, H) {
-    const x0 = Math.max(0, dx);
-    const y0 = Math.max(0, dy);
-    const x1 = Math.min(W, dx + W);
-    const y1 = Math.min(H, dy + H);
+  // N-way intersection of every frame's placed rect [dx,dy,dx+W,dy+H], seeded
+  // with frame 0's own rect [0,0,W,H].
+  function computeOverlapRectN(frames, W, H) {
+    let x0 = 0, y0 = 0, x1 = W, y1 = H;
+    for (const f of frames) {
+      x0 = Math.max(x0, f.dx);
+      y0 = Math.max(y0, f.dy);
+      x1 = Math.min(x1, f.dx + W);
+      y1 = Math.min(y1, f.dy + H);
+    }
     return { x0, y0, x1, y1, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+  }
+
+  // While stepping, only confirmed frames plus the one currently being
+  // dragged contribute to the overlap — frames not yet reached don't exist
+  // in the composition yet. Once ready, every frame's final offset counts.
+  function currentOverlapFrames() {
+    return state.mode === 'stepping'
+      ? state.frames.slice(0, state.alignStep.current + 1)
+      : state.frames;
+  }
+
+  function currentOverlapRect() {
+    return computeOverlapRectN(currentOverlapFrames(), state.W, state.H);
   }
 
   function clampAlign(dx, dy, W, H) {
@@ -160,7 +221,7 @@
   }
 
   function resetCropToOverlap() {
-    const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+    const ov = currentOverlapRect();
     state.crop = state.cropRatio
       ? fitCropToRatio({ x: ov.x0, y: ov.y0, w: ov.w, h: ov.h }, state.cropRatio, ov)
       : { x: ov.x0, y: ov.y0, w: ov.w, h: ov.h };
@@ -191,7 +252,7 @@
   }
 
   function clampCropToOverlap() {
-    const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+    const ov = currentOverlapRect();
     if (state.cropRatio) {
       state.crop = fitCropToRatio(state.crop, state.cropRatio, ov);
       return;
@@ -205,7 +266,7 @@
   }
 
   function clampResizeCrop(startCrop, handle, dx, dy, ratio) {
-    const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+    const ov = currentOverlapRect();
     const right = startCrop.x + startCrop.w;
     const bottom = startCrop.y + startCrop.h;
 
@@ -272,10 +333,9 @@
     outputSizeLabel.textContent = `Output size: ${w} × ${h} px`;
   }
 
-  function sourceRectFor(which, crop, dx, dy) {
-    return which === 'left'
-      ? { sx: crop.x, sy: crop.y, sw: crop.w, sh: crop.h }
-      : { sx: crop.x - dx, sy: crop.y - dy, sw: crop.w, sh: crop.h };
+  function sourceRectFor(frameIndex, crop) {
+    const f = state.frames[frameIndex];
+    return { sx: crop.x - f.dx, sy: crop.y - f.dy, sw: crop.w, sh: crop.h };
   }
 
   function clamp255(v) {
@@ -351,13 +411,13 @@
   }
 
   // Draws one adjusted/cropped/tinted frame into destCtx. Used by both the
-  // live preview loop and the final full-resolution GIF export, so the two
-  // can never drift apart.
-  function drawAdjustedFrame(destCtx, which, destX, destY, destW, destH) {
-    const img = which === 'left' ? state.imgLeft : state.imgRight;
-    const { sx, sy, sw, sh } = sourceRectFor(which, state.crop, state.align.dx, state.align.dy);
+  // live preview loop and the final full-resolution GIF/WebP export, so the
+  // preview can never drift from the actual exported file.
+  function drawAdjustedFrame(destCtx, frameIndex, destX, destY, destW, destH) {
+    const f = state.frames[frameIndex];
+    const { sx, sy, sw, sh } = sourceRectFor(frameIndex, state.crop);
 
-    destCtx.drawImage(img, sx, sy, sw, sh, destX, destY, destW, destH);
+    destCtx.drawImage(f.img, sx, sy, sw, sh, destX, destY, destW, destH);
 
     const needsPixelAdjust = state.adjust.brightness !== 0 || state.adjust.contrast !== 0 ||
       state.adjust.hue !== 0 || state.adjust.colorMode === 'bw' || state.adjust.colorMode === 'sepia';
@@ -372,7 +432,7 @@
     if (state.adjust.colorMode === 'anaglyph') {
       destCtx.save();
       destCtx.globalCompositeOperation = 'multiply';
-      destCtx.fillStyle = which === 'left' ? TINT_LEFT : TINT_RIGHT;
+      destCtx.fillStyle = frameIndex % 2 === 0 ? TINT_LEFT : TINT_RIGHT;
       destCtx.fillRect(destX, destY, destW, destH);
       destCtx.restore();
     }
@@ -401,12 +461,29 @@
   }
 
   function updateOffsetLabel() {
-    alignOffsetLabel.textContent = `Offset: ${Math.round(state.align.dx)}, ${Math.round(state.align.dy)} px`;
+    const f = state.frames[activeAlignFrameIndex()];
+    alignOffsetLabel.textContent = `Offset: ${Math.round(f.dx)}, ${Math.round(f.dy)} px`;
+  }
+
+  function range(a, b) {
+    return Array.from({ length: Math.max(0, b - a) }, (_, i) => a + i);
+  }
+
+  // Draws already-confirmed frames stacked at globalAlpha = 1/(position),
+  // which by induction produces the exact unweighted pixel average of those
+  // frames on an opaque canvas — not merely an approximation of a blend.
+  // The frame currently being aligned (if any) is drawn on top at a fixed
+  // translucency, since it's "the thing you're moving," not part of the average.
+  function drawRunningAverageStack(confirmedIndices, currentIndex, drawFrame) {
+    confirmedIndices.forEach((frameIndex, i) => drawFrame(frameIndex, 1 / (i + 1)));
+    if (currentIndex != null) drawFrame(currentIndex, 0.55);
   }
 
   // Zoomed-in ghosted view centered on the given native-space point — lets
   // fine alignment work (e.g. lining up an eye) happen at native-pixel
   // precision even though the main canvas is scaled way down to fit on screen.
+  // Mirrors whatever composite drawAlignmentCanvas would show for the
+  // current mode/step, just zoomed.
   function drawMagnifier(nativeX, nativeY) {
     const mc = magnifierCanvas;
     const halfW = mc.width / (2 * MAGNIFIER_ZOOM);
@@ -414,19 +491,24 @@
 
     magnifierCtx.clearRect(0, 0, mc.width, mc.height);
 
-    magnifierCtx.globalAlpha = 1;
-    magnifierCtx.drawImage(
-      state.imgLeft,
-      nativeX - halfW, nativeY - halfH, halfW * 2, halfH * 2,
-      0, 0, mc.width, mc.height
-    );
+    function drawOneFrame(frameIndex, alpha) {
+      const f = state.frames[frameIndex];
+      magnifierCtx.globalAlpha = alpha;
+      magnifierCtx.drawImage(
+        f.img,
+        nativeX - f.dx - halfW, nativeY - f.dy - halfH, halfW * 2, halfH * 2,
+        0, 0, mc.width, mc.height
+      );
+    }
 
-    magnifierCtx.globalAlpha = 0.5;
-    magnifierCtx.drawImage(
-      state.imgRight,
-      nativeX - state.align.dx - halfW, nativeY - state.align.dy - halfH, halfW * 2, halfH * 2,
-      0, 0, mc.width, mc.height
-    );
+    if (state.mode === 'stepping') {
+      drawRunningAverageStack(range(0, state.alignStep.current), state.alignStep.current, drawOneFrame);
+    } else if (frameCount() === 2) {
+      drawOneFrame(0, 1);
+      drawOneFrame(1, 0.5);
+    } else {
+      drawRunningAverageStack(range(0, frameCount()), null, drawOneFrame);
+    }
     magnifierCtx.globalAlpha = 1;
 
     magnifierCtx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
@@ -471,7 +553,9 @@
   // "move" — the crop starts out covering the entire overlap (most of the
   // canvas), so treating its interior as a drag target would leave almost no
   // clickable area for the (primary) align-drag interaction underneath it.
+  // Also only active once the crop UI actually exists (ready mode).
   function hitTestCrop(canvasX, canvasY) {
+    if (state.mode !== 'ready') return null;
     for (const handle of cropHandlePositions()) {
       const p = toAlignCanvasXY(handle.cx, handle.cy);
       if (Math.hypot(canvasX - p.x, canvasY - p.y) <= HIT_TOLERANCE_PX + HANDLE_R) {
@@ -486,34 +570,46 @@
   function updateAlignHoverCursor(clientX, clientY) {
     const { x: cx, y: cy } = clientToCanvasXY(alignCanvas, clientX, clientY);
     const hit = hitTestCrop(cx, cy);
-    alignCanvas.style.cursor = hit ? CURSOR_BY_HANDLE[hit.handle] : 'grab';
+    if (hit) {
+      alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
+      return;
+    }
+    alignCanvas.style.cursor = alignDragEnabled() ? 'grab' : 'default';
   }
 
-  // --- Align & crop canvas (one shared view: ghosted double-exposure for
+  // --- Align & crop canvas (one shared view: ghosted composite for
   // alignment, plus the crop rectangle/handles, both clamped to the overlap) ---
 
   function drawAlignmentCanvas() {
     const s = alignScale;
     alignCtx.clearRect(0, 0, alignCanvas.width, alignCanvas.height);
 
-    alignCtx.globalAlpha = 1;
-    alignCtx.drawImage(state.imgLeft, ALIGN_MARGIN_NATIVE * s, ALIGN_MARGIN_NATIVE * s, state.W * s, state.H * s);
+    function drawOneFrame(frameIndex, alpha) {
+      const f = state.frames[frameIndex];
+      alignCtx.globalAlpha = alpha;
+      alignCtx.drawImage(
+        f.img,
+        (ALIGN_MARGIN_NATIVE + f.dx) * s,
+        (ALIGN_MARGIN_NATIVE + f.dy) * s,
+        state.W * s,
+        state.H * s
+      );
+    }
 
-    alignCtx.globalAlpha = 0.5;
-    alignCtx.drawImage(
-      state.imgRight,
-      (ALIGN_MARGIN_NATIVE + state.align.dx) * s,
-      (ALIGN_MARGIN_NATIVE + state.align.dy) * s,
-      state.W * s,
-      state.H * s
-    );
+    if (state.mode === 'stepping') {
+      drawRunningAverageStack(range(0, state.alignStep.current), state.alignStep.current, drawOneFrame);
+    } else if (frameCount() === 2) {
+      drawOneFrame(0, 1);
+      drawOneFrame(1, 0.5);
+    } else {
+      drawRunningAverageStack(range(0, frameCount()), null, drawOneFrame);
+    }
     alignCtx.globalAlpha = 1;
 
     // Dashed, since the crop rect commonly coincides exactly with the overlap
-    // (e.g. right after load, or after any pure-alignment change) — a solid
-    // stroke would then be fully hidden underneath the solid orange crop
-    // outline drawn next.
-    const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+    // — a solid stroke would then be fully hidden underneath the solid
+    // orange crop outline drawn next.
+    const ov = currentOverlapRect();
     const ovTopLeft = toAlignCanvasXY(ov.x0, ov.y0);
     alignCtx.strokeStyle = '#22c55e';
     alignCtx.lineWidth = 2;
@@ -521,18 +617,22 @@
     alignCtx.strokeRect(ovTopLeft.x, ovTopLeft.y, (ov.x1 - ov.x0) * s, (ov.y1 - ov.y0) * s);
     alignCtx.setLineDash([]);
 
-    drawCropOverlay();
+    if (state.mode === 'ready') drawCropOverlay();
   }
 
   function nudgeAlign(ddx, ddy) {
-    const clamped = clampAlign(state.align.dx + ddx, state.align.dy + ddy, state.W, state.H);
-    state.align.dx = clamped.dx;
-    state.align.dy = clamped.dy;
-    clampCropToOverlap();
-    recomputePreviewScale();
+    if (!alignDragEnabled()) return;
+    const f = state.frames[activeAlignFrameIndex()];
+    const clamped = clampAlign(f.dx + ddx, f.dy + ddy, state.W, state.H);
+    f.dx = clamped.dx;
+    f.dy = clamped.dy;
+    if (state.mode === 'ready') {
+      clampCropToOverlap();
+      recomputePreviewScale();
+    }
     drawAlignmentCanvas();
     updateOffsetLabel();
-    updateOutputSizeLabel();
+    if (state.mode === 'ready') updateOutputSizeLabel();
     if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
   }
 
@@ -545,20 +645,23 @@
     if (hit) {
       alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
       state.drag = {
-        kind: hit.kind,
+        kind: 'crop-resize',
         handle: hit.handle,
         startClientX: e.clientX,
         startClientY: e.clientY,
         startCrop: { ...state.crop },
       };
-    } else {
+    } else if (alignDragEnabled()) {
+      const targetFrame = activeAlignFrameIndex();
+      const f = state.frames[targetFrame];
       alignCanvas.style.cursor = 'grabbing';
       state.drag = {
         kind: 'align',
+        frameIndex: targetFrame,
         startClientX: e.clientX,
         startClientY: e.clientY,
-        startDx: state.align.dx,
-        startDy: state.align.dy,
+        startDx: f.dx,
+        startDy: f.dy,
       };
     }
   });
@@ -577,13 +680,16 @@
     if (state.drag.kind === 'align') {
       const { dx, dy } = nativeDelta(alignCanvas, alignScale, state.drag.startClientX, state.drag.startClientY, e.clientX, e.clientY);
       const clamped = clampAlign(state.drag.startDx + dx, state.drag.startDy + dy, state.W, state.H);
-      state.align.dx = clamped.dx;
-      state.align.dy = clamped.dy;
-      clampCropToOverlap();
-      recomputePreviewScale();
+      const f = state.frames[state.drag.frameIndex];
+      f.dx = clamped.dx;
+      f.dy = clamped.dy;
+      if (state.mode === 'ready') {
+        clampCropToOverlap();
+        recomputePreviewScale();
+      }
       drawAlignmentCanvas();
       updateOffsetLabel();
-      updateOutputSizeLabel();
+      if (state.mode === 'ready') updateOutputSizeLabel();
     } else {
       // alignScale is intentionally NOT recomputed mid-drag so the
       // canvas-to-native ratio stays constant for the duration of the drag.
@@ -626,14 +732,133 @@
   });
 
   resetAlignBtn.addEventListener('click', () => {
-    state.align.dx = 0;
-    state.align.dy = 0;
-    clampCropToOverlap();
+    if (!alignDragEnabled()) return;
+    const f = state.frames[activeAlignFrameIndex()];
+    f.dx = 0;
+    f.dy = 0;
+    if (state.mode === 'ready') {
+      clampCropToOverlap();
+      recomputePreviewScale();
+    }
+    drawAlignmentCanvas();
+    updateOffsetLabel();
+    if (state.mode === 'ready') updateOutputSizeLabel();
+    if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
+  });
+
+  // --- Step-by-step alignment for 3+ frames ---
+
+  function updateStepLabel() {
+    alignStepFrameNumEl.textContent = String(state.alignStep.current + 1);
+    alignStepTotalEl.textContent = String(frameCount());
+    alignBackBtn.disabled = state.alignStep.current <= 1;
+    alignConfirmBtn.textContent = state.alignStep.current === frameCount() - 1 ? 'Confirm & finish' : 'Confirm & next';
+  }
+
+  function renderThumbnailStrip() {
+    frameThumbSectionEl.hidden = frameCount() <= 2;
+    if (frameCount() <= 2) return;
+    thumbStripEl.innerHTML = '';
+    state.frames.forEach((f, i) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'thumb';
+      const img = document.createElement('img');
+      img.className = 'thumb-img';
+      img.src = f.img.src;
+      img.alt = `Frame ${i + 1}`;
+      const label = document.createElement('span');
+      label.className = 'thumb-label';
+      label.textContent = String(i + 1);
+      wrap.appendChild(img);
+      wrap.appendChild(label);
+      thumbStripEl.appendChild(wrap);
+    });
+    updateThumbnailStripState();
+  }
+
+  function updateThumbnailStripState() {
+    if (frameCount() <= 2) return;
+    const activeIndex = state.mode === 'stepping' ? state.alignStep.current : -1;
+    Array.from(thumbStripEl.children).forEach((el, i) => {
+      el.classList.toggle('confirmed', !!state.alignStep.confirmed[i] || state.mode === 'ready');
+      el.classList.toggle('active', i === activeIndex);
+    });
+  }
+
+  function applyModeVisibility() {
+    const ready = state.mode === 'ready';
+    const stepping = state.mode === 'stepping';
+    const multi = frameCount() > 2;
+
+    frameThumbSectionEl.hidden = !multi;
+    alignStepControlsEl.hidden = !stepping;
+    alignEditLinkRowEl.hidden = !(ready && multi);
+    resetAlignBtn.hidden = !alignDragEnabled();
+    alignMagnifierColEl.hidden = !alignDragEnabled();
+    cropExportPanelEl.hidden = !ready;
+    orderSectionEl.hidden = !(ready && multi);
+    alignCanvas.style.cursor = alignDragEnabled() ? 'grab' : 'default';
+  }
+
+  function onStepChanged() {
+    applyModeVisibility();
+    drawAlignmentCanvas();
+    updateOffsetLabel();
+    updateStepLabel();
+    updateThumbnailStripState();
+    lastHoverNative = null;
+    hideMagnifier();
+  }
+
+  function enterReadyMode() {
+    state.mode = 'ready';
+    resetCropToOverlap();
+    recomputeAlignScale();
     recomputePreviewScale();
+
+    state.order = defaultOrder(frameCount());
+    orderInput.value = formatOrder(state.order);
+    orderErrorEl.hidden = true;
+    orderValid = true;
+
+    updateColorModeAvailability();
+    applyModeVisibility();
     drawAlignmentCanvas();
     updateOffsetLabel();
     updateOutputSizeLabel();
-    if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
+    updateThumbnailStripState();
+    updateGenerateButtonsDisabled();
+
+    lastHoverNative = null;
+    hideMagnifier();
+    startPreviewLoop();
+  }
+
+  function confirmCurrentStep() {
+    const k = state.alignStep.current;
+    state.alignStep.confirmed[k] = true;
+    if (k + 1 < frameCount()) {
+      state.alignStep.current = k + 1;
+      onStepChanged();
+    } else {
+      enterReadyMode();
+    }
+  }
+
+  function backStep() {
+    if (state.alignStep.current <= 1) return;
+    state.alignStep.current -= 1;
+    onStepChanged(); // deliberately does NOT clear confirmed[] for frames beyond the new current
+  }
+
+  alignConfirmBtn.addEventListener('click', confirmCurrentStep);
+  alignBackBtn.addEventListener('click', backStep);
+
+  editAlignmentBtn.addEventListener('click', () => {
+    stopPreviewLoop();
+    state.mode = 'stepping';
+    state.alignStep.current = frameCount() - 1;
+    onStepChanged();
   });
 
   // --- Live preview animation loop (read-only mimic of the final GIF) ---
@@ -648,7 +873,7 @@
     state.previewElapsed += delta;
     const flipInterval = 1000 / state.fps;
     if (state.previewElapsed >= flipInterval) {
-      state.previewShowingLeft = !state.previewShowingLeft;
+      state.previewOrderIdx = (state.previewOrderIdx + 1) % state.order.length;
       state.previewElapsed = 0;
     }
 
@@ -658,15 +883,15 @@
 
   function drawPreviewFrame() {
     previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-    const which = state.previewShowingLeft ? 'left' : 'right';
-    drawAdjustedFrame(previewCtx, which, 0, 0, previewCanvas.width, previewCanvas.height);
+    const frameIndex = state.order[state.previewOrderIdx % state.order.length];
+    drawAdjustedFrame(previewCtx, frameIndex, 0, 0, previewCanvas.width, previewCanvas.height);
   }
 
   function startPreviewLoop() {
     stopPreviewLoop();
     lastFrameTime = null;
     state.previewElapsed = 0;
-    state.previewShowingLeft = true;
+    state.previewOrderIdx = 0;
     state.previewRAF = requestAnimationFrame(previewTick);
   }
 
@@ -735,7 +960,7 @@
       if (!radio.checked) return;
       state.cropRatio = CROP_RATIOS[radio.value];
       if (state.cropRatio) {
-        const ov = computeOverlapRect(state.align.dx, state.align.dy, state.W, state.H);
+        const ov = currentOverlapRect();
         state.crop = fitCropToRatio(state.crop, state.cropRatio, ov);
       }
       recomputePreviewScale();
@@ -743,6 +968,65 @@
       updateOutputSizeLabel();
     });
   });
+
+  // Anaglyph tint is inherently a 2-view concept — disable it once there are
+  // more than 2 frames, falling back to Normal if it was somehow selected.
+  function updateColorModeAvailability() {
+    const anaglyphRadio = document.querySelector('input[name="color-mode"][value="anaglyph"]');
+    const disable = frameCount() > 2;
+    anaglyphRadio.disabled = disable;
+    anaglyphRadio.closest('label').classList.toggle('disabled-option', disable);
+    if (disable && anaglyphRadio.checked) {
+      document.querySelector('input[name="color-mode"][value="normal"]').checked = true;
+      state.adjust.colorMode = 'normal';
+    }
+  }
+
+  // --- Animation order (3+ frames) ---
+
+  function defaultOrder(n) {
+    const forward = Array.from({ length: n }, (_, i) => i);
+    const backward = Array.from({ length: Math.max(0, n - 2) }, (_, i) => n - 2 - i); // empty when n===2
+    return forward.concat(backward);
+  }
+
+  function formatOrder(order) {
+    return order.map((i) => i + 1).join(',');
+  }
+
+  function parseOrder(text, n) {
+    const trimmed = text.trim();
+    if (trimmed === '') return { error: 'Enter at least 2 frame numbers, comma-separated (e.g. "1,2,3,2").' };
+    const parts = trimmed.split(',').map((s) => s.trim());
+    if (parts.length > MAX_ORDER_LENGTH) return { error: `Sequence too long — max ${MAX_ORDER_LENGTH} entries.` };
+    if (parts.length < 2) return { error: 'Enter at least 2 frame numbers.' };
+
+    const indices = [];
+    for (const part of parts) {
+      if (!/^\d+$/.test(part)) return { error: `"${part}" isn't a whole number.` };
+      const num = Number(part);
+      if (num < 1 || num > n) return { error: `${num} is out of range — this set has ${n} frames (1–${n}).` };
+      indices.push(num - 1);
+    }
+    return { order: indices };
+  }
+
+  orderInput.addEventListener('input', () => {
+    const result = parseOrder(orderInput.value, frameCount());
+    orderValid = !result.error;
+    orderErrorEl.hidden = orderValid;
+    if (result.error) {
+      orderErrorEl.textContent = result.error;
+    } else {
+      state.order = result.order;
+    }
+    updateGenerateButtonsDisabled();
+  });
+
+  function updateGenerateButtonsDisabled() {
+    generateGifBtn.disabled = !orderValid;
+    generateWebpBtn.disabled = !orderValid || !webpSupported;
+  }
 
   // --- Animated WebP muxing ---
   //
@@ -869,10 +1153,10 @@
       height: canvas.height,
     });
 
-    drawAdjustedFrame(ctx, 'left', 0, 0, canvas.width, canvas.height);
-    gif.addFrame(canvas, { copy: true, delay });
-    drawAdjustedFrame(ctx, 'right', 0, 0, canvas.width, canvas.height);
-    gif.addFrame(canvas, { copy: true, delay });
+    for (const frameIndex of state.order) {
+      drawAdjustedFrame(ctx, frameIndex, 0, 0, canvas.width, canvas.height);
+      gif.addFrame(canvas, { copy: true, delay });
+    }
 
     return new Promise((resolve) => {
       gif.on('progress', (p) => window.AppShared.setStatus(`Encoding GIF… ${Math.round(p * 100)}%`));
@@ -886,22 +1170,17 @@
     const ctx = canvas.getContext('2d');
     const WEBP_QUALITY = 0.92;
 
-    drawAdjustedFrame(ctx, 'left', 0, 0, canvas.width, canvas.height);
-    const leftBlob = await canvasToBlob(canvas, 'image/webp', WEBP_QUALITY);
-    if (leftBlob.type !== 'image/webp') {
-      throw new Error("This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.");
+    const frames = [];
+    for (const frameIndex of state.order) {
+      drawAdjustedFrame(ctx, frameIndex, 0, 0, canvas.width, canvas.height);
+      const blob = await canvasToBlob(canvas, 'image/webp', WEBP_QUALITY);
+      if (blob.type !== 'image/webp') {
+        throw new Error("This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.");
+      }
+      frames.push({ bytes: new Uint8Array(await blob.arrayBuffer()), duration: delay });
     }
-    const leftBytes = new Uint8Array(await leftBlob.arrayBuffer());
 
-    drawAdjustedFrame(ctx, 'right', 0, 0, canvas.width, canvas.height);
-    const rightBlob = await canvasToBlob(canvas, 'image/webp', WEBP_QUALITY);
-    const rightBytes = new Uint8Array(await rightBlob.arrayBuffer());
-
-    const animatedBytes = buildAnimatedWebp(
-      [{ bytes: leftBytes, duration: delay }, { bytes: rightBytes, duration: delay }],
-      canvas.width,
-      canvas.height
-    );
+    const animatedBytes = buildAnimatedWebp(frames, canvas.width, canvas.height);
     return { blob: new Blob([animatedBytes], { type: 'image/webp' }), extension: 'webp' };
   }
 
@@ -933,8 +1212,7 @@
       console.error(err);
       window.AppShared.setStatus(err.message || 'Something went wrong generating the output.', true);
     } finally {
-      generateGifBtn.disabled = false;
-      generateWebpBtn.disabled = !webpSupported;
+      updateGenerateButtonsDisabled();
     }
   }
 
@@ -947,25 +1225,22 @@
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      if (!state.imgLeft) return;
+      if (state.frames.length === 0) return;
       recomputeAlignScale();
-      recomputePreviewScale();
+      if (state.mode === 'ready') recomputePreviewScale();
       drawAlignmentCanvas();
     }, 150);
   });
 
   // --- Public API ---
 
-  function load(imgLeft, imgRight, baseName) {
+  function load(images, baseName) {
     stopPreviewLoop();
 
-    state.imgLeft = imgLeft;
-    state.imgRight = imgRight;
-    state.W = imgLeft.naturalWidth;
-    state.H = imgLeft.naturalHeight;
+    state.frames = images.map((img) => ({ img, dx: 0, dy: 0 }));
+    state.W = images[0].naturalWidth;
+    state.H = images[0].naturalHeight;
     state.baseName = baseName;
-    state.align.dx = 0;
-    state.align.dy = 0;
     state.fps = Number(fpsSlider.value) || state.fps;
 
     applyBrightness(0);
@@ -976,25 +1251,41 @@
     cropRatioRadios.forEach((radio) => { radio.checked = radio.value === 'none'; });
     state.cropRatio = null;
 
-    resetCropToOverlap();
+    updateColorModeAvailability();
+    renderThumbnailStrip();
     recomputeAlignScale();
-    recomputePreviewScale();
 
     editorEl.hidden = false;
     outputEl.hidden = true;
-
-    drawAlignmentCanvas();
-    updateOffsetLabel();
-    updateOutputSizeLabel();
     resultSizeLabel.textContent = '';
     lastHoverNative = null;
     hideMagnifier();
-    startPreviewLoop();
+
+    if (frameCount() > 2) {
+      state.mode = 'stepping';
+      state.alignStep.current = 1;
+      state.alignStep.confirmed = state.frames.map((_, i) => i === 0);
+      onStepChanged();
+    } else {
+      state.alignStep.current = 1;
+      state.alignStep.confirmed = state.frames.map(() => true);
+      enterReadyMode();
+    }
   }
 
   function reset() {
     stopPreviewLoop();
     state.drag = null;
+    state.frames = [];
+    state.order = [];
+    state.mode = 'ready';
+    state.alignStep = { current: 1, confirmed: [] };
+    state.crop = { x: 0, y: 0, w: 0, h: 0 };
+    thumbStripEl.innerHTML = '';
+    frameThumbSectionEl.hidden = true;
+    orderInput.value = '';
+    orderErrorEl.hidden = true;
+    orderValid = true;
     editorEl.hidden = true;
     outputEl.hidden = true;
   }

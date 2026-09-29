@@ -1,8 +1,12 @@
 (function () {
+  const MAX_FRAMES = 10;
+
   const fileInput = document.getElementById('file-input');
   const dropZone = document.getElementById('drop-zone');
   const statusEl = document.getElementById('status');
 
+  const dualDropRow = document.getElementById('dual-drop-row');
+  const frameBoxTemplate = document.getElementById('frame-drop-zone-template');
   const leftFileInput = document.getElementById('left-file-input');
   const leftDropZone = document.getElementById('left-drop-zone');
   const rightFileInput = document.getElementById('right-file-input');
@@ -10,8 +14,11 @@
 
   let currentFileBaseName = 'wiggle';
   let trackedObjectUrls = [];
-  let pendingLeftFile = null;
-  let pendingRightFile = null;
+  let pendingFrameFiles = []; // File[], index-aligned with frameBoxes
+  let frameBoxes = [
+    { zoneEl: leftDropZone, inputEl: leftFileInput },
+    { zoneEl: rightDropZone, inputEl: rightFileInput },
+  ];
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -123,9 +130,11 @@
     currentFileBaseName = baseName;
   }
 
-  function finishLoadingFrames(imgLeft, imgRight) {
-    window.Editor.load(imgLeft, imgRight, currentFileBaseName);
-    setStatus('Ready — align, crop, and adjust below, then generate the GIF.');
+  function finishLoadingFrames(images) {
+    window.Editor.load(images, currentFileBaseName);
+    setStatus(images.length > 2
+      ? 'Ready — step through aligning each frame below, then crop, adjust, and generate.'
+      : 'Ready — align, crop, and adjust below, then generate the GIF.');
   }
 
   function setDualBoxFile(zoneEl, nameEl, file) {
@@ -133,9 +142,13 @@
     nameEl.textContent = file ? file.name : '';
   }
 
-  function resetDualBoxes() {
-    pendingLeftFile = null;
-    pendingRightFile = null;
+  function resetFrameBoxes() {
+    pendingFrameFiles = [];
+    while (dualDropRow.children.length > 2) dualDropRow.lastElementChild.remove();
+    frameBoxes = [
+      { zoneEl: leftDropZone, inputEl: leftFileInput },
+      { zoneEl: rightDropZone, inputEl: rightFileInput },
+    ];
     leftFileInput.value = '';
     rightFileInput.value = '';
     setDualBoxFile(leftDropZone, leftDropZone.querySelector('.file-name'), null);
@@ -143,7 +156,7 @@
   }
 
   async function handleFile(file) {
-    resetDualBoxes();
+    resetFrameBoxes();
     beginNewLoad(file.name.replace(/\.[^.]+$/, '') || 'wiggle');
 
     fileInput.disabled = true;
@@ -163,7 +176,7 @@
         loadImageFromBytes(frames[1]),
       ]);
 
-      finishLoadingFrames(imgLeft, imgRight);
+      finishLoadingFrames([imgLeft, imgRight]);
     } catch (err) {
       console.error(err);
       setStatus(err.message || 'Something went wrong reading that file.', true);
@@ -172,17 +185,47 @@
     }
   }
 
-  async function handleTwoFiles(leftFile, rightFile) {
-    fileInput.value = '';
-    beginNewLoad(leftFile.name.replace(/\.[^.]+$/, '') || 'wiggle');
+  function appendFrameBox(index) {
+    const clone = frameBoxTemplate.content.cloneNode(true);
+    const zoneEl = clone.querySelector('.drop-zone');
+    const inputEl = clone.querySelector('.frame-file-input');
+    clone.querySelector('.frame-label').textContent = `Frame ${index + 1}`;
+    inputEl.id = `frame-file-input-${index}`;
+    dualDropRow.appendChild(clone);
+    frameBoxes[index] = { zoneEl, inputEl };
+    wireDropZone(zoneEl, inputEl, (file) => handleFrameFileSelected(index, file));
+  }
 
+  function maybeGrowBoxes() {
+    while (frameBoxes.length < MAX_FRAMES && pendingFrameFiles[frameBoxes.length - 1]) {
+      appendFrameBox(frameBoxes.length);
+    }
+  }
+
+  function contiguousFilledCount() {
+    let n = 0;
+    while (n < pendingFrameFiles.length && pendingFrameFiles[n]) n++;
+    return n;
+  }
+
+  function handleFrameFileSelected(index, file) {
+    pendingFrameFiles[index] = file;
+    setDualBoxFile(frameBoxes[index].zoneEl, frameBoxes[index].zoneEl.querySelector('.file-name'), file);
+    maybeGrowBoxes();
+    commitFrames();
+  }
+
+  async function commitFrames() {
+    const n = contiguousFilledCount();
+    if (n < 2) return;
+    const files = pendingFrameFiles.slice(0, n);
+
+    fileInput.value = '';
+    beginNewLoad(files[0].name.replace(/\.[^.]+$/, '') || 'wiggle');
     setStatus('Decoding frames…');
     try {
-      const [imgLeft, imgRight] = await Promise.all([
-        loadImageFromFile(leftFile),
-        loadImageFromFile(rightFile),
-      ]);
-      finishLoadingFrames(imgLeft, imgRight);
+      const images = await Promise.all(files.map(loadImageFromFile));
+      finishLoadingFrames(images);
     } catch (err) {
       console.error(err);
       setStatus(err.message || 'Something went wrong reading those files.', true);
@@ -211,16 +254,6 @@
   }
 
   wireDropZone(dropZone, fileInput, handleFile);
-
-  wireDropZone(leftDropZone, leftFileInput, (file) => {
-    pendingLeftFile = file;
-    setDualBoxFile(leftDropZone, leftDropZone.querySelector('.file-name'), file);
-    if (pendingRightFile) handleTwoFiles(pendingLeftFile, pendingRightFile);
-  });
-
-  wireDropZone(rightDropZone, rightFileInput, (file) => {
-    pendingRightFile = file;
-    setDualBoxFile(rightDropZone, rightDropZone.querySelector('.file-name'), file);
-    if (pendingLeftFile) handleTwoFiles(pendingLeftFile, pendingRightFile);
-  });
+  wireDropZone(leftDropZone, leftFileInput, (file) => handleFrameFileSelected(0, file));
+  wireDropZone(rightDropZone, rightFileInput, (file) => handleFrameFileSelected(1, file));
 })();

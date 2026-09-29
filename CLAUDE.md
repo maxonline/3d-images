@@ -1,10 +1,10 @@
-# W3 Wiggle GIF/WebP Maker
+# Wigglegram Maker
 
-A static, no-build client-side web app that turns Fujifilm FinePix Real 3D W3
-stereo photos (`.MPO` files, or two separate JPEGs) into an animated
-"wiggle stereoscopy" GIF or WebP — flipping between the left/right frames to
-fake 3D depth. Everything runs in the browser; there is no server-side code
-and no build step.
+A static, no-build client-side web app that turns a Fujifilm FinePix Real 3D
+W3 stereo photo (`.MPO` file) or a set of 2–10 separately-uploaded JPEGs into
+an animated "wigglegram" GIF or WebP — cycling through the frames to fake 3D
+depth or create a burst-sequence animation. Everything runs in the browser;
+there is no server-side code and no build step.
 
 ## Running it
 
@@ -28,20 +28,20 @@ Production deploys to a real server (nginx, HTTPS) are covered in
 web/
   index.html   — all markup/UI
   style.css    — all styling
-  app.js       — file intake: MPO splitting, JPEG decoding, drag & drop
-  editor.js    — everything after frames are loaded: align/crop UI,
-                 live preview, adjustments, GIF/WebP export
+  app.js       — file intake: MPO splitting, JPEG decoding, dynamic 2–10
+                 frame upload boxes, drag & drop
+  editor.js    — everything after frames are loaded: step-by-step alignment
+                 for 3+ frames, crop UI, live preview, adjustments, animation
+                 order, GIF/WebP export
   lib/         — vendored gif.js + gif.worker.js (jnordberg/gif.js 0.2.0),
                  no npm, no other dependencies
-test/
-  test.MPO     — a real sample file from the camera, used for manual/agent testing
 run.sh         — serves web/ locally
 ```
 
 `app.js` and `editor.js` talk to each other through two small globals set up
 at load time: `window.AppShared` (status line + object-URL tracking, owned
-by `app.js`) and `window.Editor` (`load(imgLeft, imgRight, baseName)` /
-`reset()`, owned by `editor.js`).
+by `app.js`) and `window.Editor` (`load(images, baseName)` where `images` is
+an array of 2–10 `HTMLImageElement`s, plus `reset()`, owned by `editor.js`).
 
 ## Key design points worth knowing before editing
 
@@ -72,10 +72,11 @@ canvas around both images so alignment drags don't push either frame off
 the visible canvas.
 
 **The crop rectangle is always clamped inside the overlap.** `state.crop`
-must stay within `computeOverlapRect(dx, dy, W, H)` — enforced by
+must stay within `currentOverlapRect()` — enforced by
 `clampCropToOverlap`/`clampResizeCrop` after every alignment or crop change.
 `clampAlign` also prevents the overlap itself from shrinking below 30% of
-the frame in either axis.
+the frame in either axis (checked pairwise against the fixed anchor frame,
+not the live N-way intersection — an accepted simplification).
 
 **Crop aspect-ratio lock (`state.cropRatio`, the "Crop aspect ratio" radio
 group) reuses the same clamp functions rather than being a separate code
@@ -93,6 +94,63 @@ funnel through the same two functions, alignment drags, arrow-key nudges,
 and corner-handle resizes all keep a locked ratio correct automatically —
 there's no separate "is a ratio locked" branch anywhere else in the drag
 handlers.
+
+**2–10 frames, one array-based model — the 2-frame case is not special-cased
+separately, it just naturally degenerates to today's old behavior.**
+`state.frames` is `[{img, dx, dy}]`; `frames[0]` is always the fixed anchor
+at `{dx:0, dy:0}` (what used to be `imgLeft`), every other frame's `dx/dy` is
+its offset relative to frame 0 (what used to be the single `state.align`).
+`app.js`'s upload UI grows a new empty box every time the last one fills, up
+to `MAX_FRAMES = 10` (`app.js`'s `appendFrameBox`/`maybeGrowBoxes`, cloned
+from `<template id="frame-drop-zone-template">`); filling any box re-fires
+`Editor.load()` with the current contiguous prefix of filled boxes — there's
+no "commit" step, matching the old 2-box behavior exactly generalized. When
+you touch anything align/crop-related, sanity-check the N=2 path still
+behaves identically — `frameCount() === 2` is threaded through as the
+condition that keeps every new UI section (thumbnail strip, step controls,
+"Edit alignment" link, animation-order box) permanently hidden via
+`applyModeVisibility()`.
+
+**Step-by-step alignment for 3+ frames (`state.mode`: `'stepping'` | `'ready'`).**
+Frame *k* is aligned by dragging it against everything confirmed so far
+(`state.alignStep.current`, `state.alignStep.confirmed[]`); the crop/preview/
+export UI (`#crop-export-panel`) only appears once every frame has been
+explicitly confirmed via the Confirm button — leaving a frame at its default
+`{0,0}` offset is a valid confirmation, no drag required. The ghosted
+backdrop you align against is drawn by `drawRunningAverageStack`, which
+draws each already-confirmed frame at `globalAlpha = 1/(its position among
+confirmed frames)` — this is worth knowing precisely because it is
+**mathematically exact**, not a fudge: by induction, sequentially compositing
+frame *i* (1-indexed) at `1/i` produces the exact unweighted pixel average of
+all frames drawn so far, for opaque sources. The frame currently being
+dragged is drawn on top at a fixed ~0.55 alpha, not part of that average.
+`drawAlignmentCanvas` and `drawMagnifier` both call this same helper with
+the same branching (stepping vs. 2-frame-ready vs. N>2-ready-mode static
+ghost) so the loupe never shows something different from the main canvas.
+Back-navigation (`backStep`) deliberately does not clear `confirmed[]` for
+frames beyond the one you rewind to — this is a low-stakes personal tool,
+and since the crop/overlap is only computed once, in `enterReadyMode()`,
+after every step is confirmed, edits made via Back flow through correctly
+regardless of visit order. `currentOverlapRect()` during stepping only
+intersects confirmed frames + the one currently being dragged
+(`currentOverlapFrames()`), which is why the dashed overlap outline visibly
+shrinks as each new frame gets positioned.
+
+**Animation order (`state.order`, 3+ frames only).** A validated,
+comma-separated 1-indexed text field (`#order-input`, `parseOrder`/
+`formatOrder`) drives both the live preview's cycling and the final export
+frame sequence — both `generateGif` and `generateWebp` now just loop over
+`state.order` calling `drawAdjustedFrame(ctx, frameIndex, ...)` once per
+entry, instead of the old two fixed calls. `defaultOrder(n)` produces a
+pendulum bounce (`[0..n-1, n-2..1]`, which is `[0,1]` — i.e. today's old
+plain alternation — when `n===2`, and `[0,1,2,3,2,1]` → displayed as
+`"1,2,3,4,3,2"` when `n===4`). `buildAnimatedWebp` needed zero changes to
+support this — it already accepted an arbitrary-length frame array.
+
+**Anaglyph tint only makes sense for 2 views.** `updateColorModeAvailability`
+disables that radio option (and force-switches to Normal if it was somehow
+selected) whenever `frameCount() > 2`; the tint itself, when active, keys off
+`frameIndex % 2` rather than a `'left'`/`'right'` string.
 
 **One shared frame-drawing function, three consumers.** `drawAdjustedFrame`
 (crop → brightness/contrast/hue/grayscale/sepia via hand-rolled pixel math →
@@ -150,12 +208,24 @@ introducing npm/bundlers.
 
 ## Testing
 
-There's no test suite. Changes have been manually verified with Playwright
-driven against a real Node (this machine's default `node` is v18 via a
-plain install, but Playwright needs Node 20+ — use `nvm use 22` first) and
-`test/test.MPO`. There's no repo convention for keeping these scripts around;
-they were written ad hoc in a scratch directory and discarded after
-verification. If you touch the alignment/crop math, re-verify against real
-image content rather than trusting synthetic fixtures — several real bugs
-here (e.g. the WebP `ICCP` chunk issue) only showed up with genuine
-browser-encoded output.
+There's no test suite and no sample images kept in the repo (the original
+`test/test.MPO` was deleted). Changes have been manually verified with
+Playwright driven against a real Node (this machine's default `node` is v18
+via a plain install, but Playwright needs Node 20+ — use `nvm use 22`
+first), using JPEGs generated on the fly with ImageMagick
+(`convert -size 320x240 xc:"steelblue" -gravity center -pointsize 60 -fill
+white -annotate 0 "1" out.jpg`) for multi-frame testing, and a real camera
+MPO when one was available. There's no repo convention for keeping these
+scripts around; they were written ad hoc in a scratch directory and
+discarded after verification. If you touch the alignment/crop math,
+re-verify against real image content rather than trusting synthetic
+fixtures — several real bugs here (e.g. the WebP `ICCP` chunk issue) only
+showed up with genuine browser-encoded output. One ImageMagick-specific
+gotcha hit while building the multi-frame tests: generating several
+`convert` calls back-to-back inside a single `for i in 1 2 3...; do
+color=${colors[$((i-1))]}; convert ...; done` shell loop produced corrupted/
+mismatched output for some frames (no error, just wrong content) in this
+environment — generating each file as its own separate command sidestepped
+it. Not investigated further since it's a test-fixture-generation quirk,
+not an app bug, but worth remembering if a multi-frame test starts showing
+implausible colors.
