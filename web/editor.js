@@ -16,7 +16,7 @@
   const contrastValue = document.getElementById('contrast-value');
   const hueSlider = document.getElementById('hue-slider');
   const hueValue = document.getElementById('hue-value');
-  const anaglyphCheckbox = document.getElementById('anaglyph-checkbox');
+  const colorModeRadios = document.querySelectorAll('input[name="color-mode"]');
 
   const fpsSlider = document.getElementById('fps-slider');
   const fpsValue = document.getElementById('fps-value');
@@ -57,7 +57,7 @@
     baseName: 'wiggle',
     align: { dx: 0, dy: 0 },
     crop: { x: 0, y: 0, w: 0, h: 0 },
-    adjust: { brightness: 0, contrast: 0, hue: 0, anaglyph: false },
+    adjust: { brightness: 0, contrast: 0, hue: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
     drag: null,
@@ -199,11 +199,14 @@
     destCtx.save();
     const b = 1 + state.adjust.brightness / 100;
     const c = 1 + state.adjust.contrast / 100;
-    destCtx.filter = `brightness(${b}) contrast(${c}) hue-rotate(${state.adjust.hue}deg)`;
+    let filter = `brightness(${b}) contrast(${c}) hue-rotate(${state.adjust.hue}deg)`;
+    if (state.adjust.colorMode === 'bw') filter += ' grayscale(1)';
+    if (state.adjust.colorMode === 'sepia') filter += ' sepia(1)';
+    destCtx.filter = filter;
     destCtx.drawImage(img, sx, sy, sw, sh, destX, destY, destW, destH);
     destCtx.restore();
 
-    if (state.adjust.anaglyph) {
+    if (state.adjust.colorMode === 'anaglyph') {
       destCtx.save();
       destCtx.globalCompositeOperation = 'multiply';
       destCtx.fillStyle = which === 'left' ? TINT_LEFT : TINT_RIGHT;
@@ -543,8 +546,10 @@
     updateOutputSizeLabel();
   });
 
-  anaglyphCheckbox.addEventListener('change', () => {
-    state.adjust.anaglyph = anaglyphCheckbox.checked;
+  colorModeRadios.forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) state.adjust.colorMode = radio.value;
+    });
   });
 
   // --- Animated WebP muxing ---
@@ -774,8 +779,8 @@
     applyBrightness(0);
     applyContrast(0);
     applyHue(0);
-    anaglyphCheckbox.checked = false;
-    state.adjust.anaglyph = false;
+    colorModeRadios.forEach((radio) => { radio.checked = radio.value === 'normal'; });
+    state.adjust.colorMode = 'normal';
 
     resetCropToOverlap();
     recomputeAlignScale();

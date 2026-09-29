@@ -129,6 +129,31 @@ h1 {
   white-space: nowrap;
 }
 
+.color-mode-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  margin: 1.5rem 0;
+  padding: 0;
+  border: 0;
+}
+
+.color-mode-group legend {
+  width: 100%;
+  padding: 0;
+  margin-bottom: 0.25rem;
+  font-weight: 600;
+}
+
+.color-mode-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .hint-inline {
   font-size: 0.85rem;
   font-weight: 400;
