@@ -16,6 +16,12 @@ This serves `web/` on `http://localhost:8000` via `python3 -m http.server`.
 A real server is required — the GIF encoder (`lib/gif.js`) uses a Web
 Worker, which browsers block under `file://`.
 
+## Deploying
+
+Production deploys to a real server (nginx, HTTPS) are covered in
+[`DEPLOY.md`](./DEPLOY.md) — `./deploy.sh` pushes `web/` to the server,
+`deploy/server-setup.sh` is the one-time nginx/certbot setup.
+
 ## Layout
 
 ```
