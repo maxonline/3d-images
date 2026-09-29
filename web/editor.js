@@ -1360,7 +1360,13 @@
     state.W = images[0].naturalWidth;
     state.H = images[0].naturalHeight;
     state.baseName = baseName;
-    state.fps = Number(fpsSlider.value) || state.fps;
+    // Preserve the previously-chosen fps across a re-load (e.g. uploading a
+    // new set of frames) rather than resetting to the HTML default — but go
+    // through applyFps rather than setting state.fps directly, so the
+    // number-box stays in sync with the slider. Browsers restore each form
+    // control's value independently on a page reload, so the two can drift
+    // apart (e.g. the number box stuck on a stale "0") if not resynced here.
+    applyFps(Number(fpsSlider.value) || state.fps);
 
     applyBrightness(0);
     applyContrast(0);
