@@ -530,7 +530,12 @@
   // frame's REAL offset, and entry.t's interpolated offset always lies
   // between two offsets already proven safe, sampling either source image
   // through that interpolated offset always stays within its native bounds.
-  function drawInterpolatedFrame(destCtx, entry, destX, destY, destW, destH) {
+  //
+  // Used as (a) the resilience fallback if the optical-flow library below
+  // fails to load/run, and (b) the instant placeholder shown the moment an
+  // interpolation count is dialed up, before that entry's real flow-based
+  // frame has finished computing — see drawOrderEntry.
+  function drawInterpolatedFrameRigid(destCtx, entry, destX, destY, destW, destH) {
     const fa = state.frames[entry.a];
     const fb = state.frames[entry.b];
     const dx = fa.dx + (fb.dx - fa.dx) * entry.t;
@@ -541,14 +546,269 @@
     applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, entry.a);
   }
 
-  // Single entry point for anything consuming state.order: an entry is
-  // either a plain 0-indexed frame number (real frame, drawn unchanged) or
-  // an { a, b, t } interpolation descriptor (see withInterpolation).
+  // --- Optical-flow interpolation (opencv.js) ---
+  //
+  // The rigid shift+crossfade above treats the whole frame as one flat
+  // plane, so anything off the alignment plane (closer or farther than
+  // whatever the user aligned on) shows double-exposure ghosting instead of
+  // real motion. Real per-pixel motion estimation fixes that, but there's no
+  // such thing built into a browser, and training/shipping a neural
+  // interpolation model (RIFE, FILM, etc.) is far too heavy for a static
+  // no-build-step site. Farneback dense optical flow (a classical, non-ML
+  // OpenCV algorithm) is the pragmatic middle ground: genuinely per-pixel,
+  // and available in a browser build of OpenCV.
+  //
+  // Loaded from a CDN, NOT vendored into web/lib/ like every other
+  // dependency in this app — this is a deliberate one-off exception. The
+  // browser build is ~13MB (WASM embedded inline as a JS
+  // string), far larger than anything else this project has ever
+  // committed, and this whole feature is an experiment the user explicitly
+  // asked to "try out"; committing 13MB of generated code to git for that
+  // felt wrong. It's loaded lazily — only the first time interpolation is
+  // actually turned on — never as a blocking page-load dependency like
+  // gif.js/mp4-muxer.js. If this technique proves worth keeping
+  // permanently, self-hosting it in web/lib/ should be reconsidered then.
+  const OPENCV_CDN_URL = 'https://unpkg.com/@techstark/opencv-js@5.0.0-release.1/dist/opencv.js';
+  let cvReadyPromise = null;
+
+  function loadOpenCv() {
+    if (cvReadyPromise) return cvReadyPromise;
+    cvReadyPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = OPENCV_CDN_URL;
+      script.onload = () => {
+        // This build's UMD wrapper (root.cv = factory()) assigns a PROMISE
+        // to window.cv, not the resolved module — it resolves once the
+        // WASM runtime finishes initializing. (Older/other opencv.js
+        // builds instead expose the module synchronously and signal
+        // readiness via cv.onRuntimeInitialized; handle both shapes.)
+        if (window.cv && typeof window.cv.then === 'function') {
+          window.cv.then((readyCv) => {
+            window.cv = readyCv;
+            resolve(readyCv);
+          }, reject);
+        } else if (window.cv && window.cv.Mat) {
+          resolve(window.cv);
+        } else {
+          window.cv = window.cv || {};
+          window.cv['onRuntimeInitialized'] = () => resolve(window.cv);
+        }
+      };
+      script.onerror = () => reject(new Error("Could not load the optical-flow library from the CDN — check your connection."));
+      document.head.appendChild(script);
+    });
+    return cvReadyPromise;
+  }
+
+  // Farneback flow (and the warp built from it) runs at a capped working
+  // resolution, not the native crop size — remap/flow cost scales with
+  // pixel count, and this keeps a single pair's prep well under a second
+  // instead of potentially tens of seconds on a real camera-resolution
+  // crop. The interpolated frame's own resolution is capped accordingly
+  // (then scaled up like any other drawImage call); the two REAL endpoint
+  // frames on either side of it are unaffected and stay full native res.
+  const FLOW_WORK_DIM = 640;
+
+  const flowPairCache = new Map(); // "a-b" -> { dx: Float32Array, dy: Float32Array, w, h }
+  const interpFrameCache = new Map(); // "a-b-t" -> HTMLCanvasElement (small, warped+blended, unadjusted)
+
+  // Must be called whenever anything the flow was computed FROM changes:
+  // a new set of images, or any frame's crop or alignment offset.
+  function clearInterpolationCaches() {
+    flowPairCache.clear();
+    interpFrameCache.clear();
+  }
+
+  function computeFlowWorkSize(nativeW, nativeH) {
+    const scale = Math.min(1, FLOW_WORK_DIM / Math.max(nativeW, nativeH));
+    return { w: Math.max(1, Math.round(nativeW * scale)), h: Math.max(1, Math.round(nativeH * scale)) };
+  }
+
+  function drawCroppedFrameToCanvas(frameIndex, w, h) {
+    const f = state.frames[frameIndex];
+    const { sx, sy, sw, sh } = sourceRectFor(frameIndex, state.crop);
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    c.getContext('2d').drawImage(f.img, sx, sy, sw, sh, 0, 0, w, h);
+    return c;
+  }
+
+  // One Farneback flow field per (a, b) pair, cached and reused across
+  // every t between them — flow doesn't depend on t, only the warp amount
+  // does, so it would be wasteful to recompute it per interpolated frame.
+  async function getFlowForPair(a, b) {
+    const key = `${a}-${b}`;
+    const cached = flowPairCache.get(key);
+    if (cached) return cached;
+
+    const cv = await loadOpenCv();
+    const { w, h } = computeFlowWorkSize(state.crop.w, state.crop.h);
+    const canvasA = drawCroppedFrameToCanvas(a, w, h);
+    const canvasB = drawCroppedFrameToCanvas(b, w, h);
+    const matA = cv.imread(canvasA);
+    const matB = cv.imread(canvasB);
+    const grayA = new cv.Mat();
+    const grayB = new cv.Mat();
+    cv.cvtColor(matA, grayA, cv.COLOR_RGBA2GRAY);
+    cv.cvtColor(matB, grayB, cv.COLOR_RGBA2GRAY);
+
+    const flow = new cv.Mat();
+    // Standard Farneback defaults (OpenCV docs' own tutorial values).
+    cv.calcOpticalFlowFarneback(grayA, grayB, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
+
+    // flow is CV_32FC2 — interleaved [dx0,dy0, dx1,dy1, ...]. Copy it out
+    // into plain typed arrays we own before deleting the Mat; .data32F is
+    // just a view over WASM memory that goes stale the instant .delete()
+    // runs.
+    const interleaved = flow.data32F;
+    const dx = new Float32Array(w * h);
+    const dy = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      dx[i] = interleaved[i * 2];
+      dy[i] = interleaved[i * 2 + 1];
+    }
+
+    matA.delete();
+    matB.delete();
+    grayA.delete();
+    grayB.delete();
+    flow.delete();
+
+    const result = { dx, dy, w, h };
+    flowPairCache.set(key, result);
+    return result;
+  }
+
+  // Builds the actual in-between frame at parameter t from a's-and-b's
+  // Farneback flow: warp A forward by t * flow and B backward by
+  // (1-t) * flow (both via cv.remap, which is an inverse/backward mapping
+  // — the standard simple-optical-flow-interpolation technique, using one
+  // flow field for both warps rather than computing flow in both
+  // directions), then blend the two warped images by t. Unlike the rigid
+  // technique, different regions of the frame move by their OWN locally
+  // estimated motion, so foreground/background parallax mismatch mostly
+  // resolves correctly instead of ghosting.
+  async function getInterpolatedCanvas(a, b, t) {
+    const key = `${a}-${b}-${t}`;
+    const cached = interpFrameCache.get(key);
+    if (cached) return cached;
+
+    const cv = await loadOpenCv();
+    const { dx, dy, w, h } = await getFlowForPair(a, b);
+
+    const canvasA = drawCroppedFrameToCanvas(a, w, h);
+    const canvasB = drawCroppedFrameToCanvas(b, w, h);
+    const matA = cv.imread(canvasA);
+    const matB = cv.imread(canvasB);
+
+    const mapAx = new cv.Mat(h, w, cv.CV_32FC1);
+    const mapAy = new cv.Mat(h, w, cv.CV_32FC1);
+    const mapBx = new cv.Mat(h, w, cv.CV_32FC1);
+    const mapBy = new cv.Mat(h, w, cv.CV_32FC1);
+    const mapAxData = mapAx.data32F;
+    const mapAyData = mapAy.data32F;
+    const mapBxData = mapBx.data32F;
+    const mapByData = mapBy.data32F;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const fx = dx[i];
+        const fy = dy[i];
+        mapAxData[i] = x - t * fx;
+        mapAyData[i] = y - t * fy;
+        mapBxData[i] = x + (1 - t) * fx;
+        mapByData[i] = y + (1 - t) * fy;
+      }
+    }
+
+    const warpedA = new cv.Mat();
+    const warpedB = new cv.Mat();
+    cv.remap(matA, warpedA, mapAx, mapAy, cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+    cv.remap(matB, warpedB, mapBx, mapBy, cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+
+    const blended = new cv.Mat();
+    cv.addWeighted(warpedA, 1 - t, warpedB, t, 0, blended);
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = w;
+    outCanvas.height = h;
+    cv.imshow(outCanvas, blended);
+
+    matA.delete();
+    matB.delete();
+    mapAx.delete();
+    mapAy.delete();
+    mapBx.delete();
+    mapBy.delete();
+    warpedA.delete();
+    warpedB.delete();
+    blended.delete();
+
+    interpFrameCache.set(key, outCanvas);
+    return outCanvas;
+  }
+
+  // Populates interpFrameCache for every interpolated entry in an order
+  // array — call this once up front (and await it) before export, so the
+  // exported file always gets full quality rather than depending on
+  // whatever happened to finish computing by the time each frame was
+  // drawn. The live preview does NOT await this (see scheduleInterpolationPrep
+  // below) — it draws the rigid fallback instantly and upgrades in place
+  // as each entry's flow-based frame finishes, entry by entry.
+  async function prepareInterpolatedFrames(order) {
+    for (const entry of order) {
+      if (typeof entry !== 'number') {
+        await getInterpolatedCanvas(entry.a, entry.b, entry.t);
+      }
+    }
+  }
+
+  // Debounced background preparation triggered whenever the interpolation
+  // count (or the base order it's built from) changes, so the preview
+  // upgrades from the instant rigid fallback to real optical flow shortly
+  // after — without recomputing on every single 'input' tick while
+  // dragging the slider. A token guards against a stale in-flight
+  // preparation's status message clobbering a newer one.
+  let interpPrepTimer = null;
+  let interpPrepToken = 0;
+
+  function scheduleInterpolationPrep() {
+    clearTimeout(interpPrepTimer);
+    if (state.interpolationCount <= 0) return;
+    interpPrepTimer = setTimeout(() => {
+      const token = ++interpPrepToken;
+      window.AppShared.setStatus('Preparing optical-flow interpolation…');
+      prepareInterpolatedFrames(state.order)
+        .then(() => {
+          if (token === interpPrepToken) window.AppShared.setStatus('Ready.');
+        })
+        .catch((err) => {
+          console.error(err);
+          if (token === interpPrepToken) {
+            window.AppShared.setStatus("Couldn't load the optical-flow library — using a simpler blend instead.", true);
+          }
+        });
+    }, 250);
+  }
+
+  // Single entry point for anything consuming state.order: a plain
+  // 0-indexed frame number is a real frame, drawn unchanged; an
+  // { a, b, t } interpolation descriptor draws the flow-based frame if
+  // it's already been computed (see getInterpolatedCanvas), else the
+  // instant rigid-shift fallback while the real one is still being
+  // prepared in the background.
   function drawOrderEntry(destCtx, entry, destX, destY, destW, destH) {
     if (typeof entry === 'number') {
       drawAdjustedFrame(destCtx, entry, destX, destY, destW, destH);
+      return;
+    }
+    const cached = interpFrameCache.get(`${entry.a}-${entry.b}-${entry.t}`);
+    if (cached) {
+      destCtx.drawImage(cached, destX, destY, destW, destH);
+      applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, entry.a);
     } else {
-      drawInterpolatedFrame(destCtx, entry, destX, destY, destW, destH);
+      drawInterpolatedFrameRigid(destCtx, entry, destX, destY, destW, destH);
     }
   }
 
@@ -749,6 +1009,8 @@
     const clamped = clampAlign(f.dx + ddx, f.dy + ddy, state.W, state.H);
     f.dx = clamped.dx;
     f.dy = clamped.dy;
+    clearInterpolationCaches();
+    scheduleInterpolationPrep();
     if (state.mode === 'ready') {
       clampCropToOverlap();
       recomputePreviewScale();
@@ -839,6 +1101,11 @@
     const wasCrop = state.drag.kind === 'crop-resize';
     state.drag = null;
     if (wasCrop) recomputePreviewScale();
+    // Either kind of drag changes what interpolated frames should look
+    // like — align changes a frame's dx/dy, crop-resize changes the region
+    // flow gets computed from — so anything cached is now stale.
+    clearInterpolationCaches();
+    scheduleInterpolationPrep();
     updateAlignHoverCursor(e.clientX, e.clientY);
   }
   alignCanvas.addEventListener('pointerup', endAlignCanvasDrag);
@@ -1059,6 +1326,7 @@
     state.interpolationCount = v;
     state.order = withInterpolation(state.baseOrder, v);
     updateColorModeAvailability();
+    scheduleInterpolationPrep();
   });
   const applyBrightness = linkSliderWithNumber(brightnessSlider, brightnessValue, (v) => {
     state.adjust.brightness = v;
@@ -1165,6 +1433,7 @@
     } else {
       state.baseOrder = result.order;
       state.order = withInterpolation(state.baseOrder, state.interpolationCount);
+      scheduleInterpolationPrep();
     }
     updateGenerateButtonsDisabled();
   });
@@ -1412,6 +1681,21 @@
     generateWebpBtn.disabled = true;
     generateMp4Btn.disabled = true;
     try {
+      if (state.interpolationCount > 0) {
+        // Unlike the live preview (which shows the instant rigid fallback
+        // and upgrades in place), an export always waits for the real
+        // optical-flow frames first — so the file never depends on
+        // whatever happened to already be cached by luck of timing. Any
+        // entry the library still can't produce (e.g. it failed to load)
+        // just draws via the rigid fallback in drawOrderEntry as normal.
+        window.AppShared.setStatus('Preparing optical-flow interpolation…');
+        try {
+          await prepareInterpolatedFrames(state.order);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+
       const { blob, extension } = format === 'webp'
         ? await generateWebp(canvas, delay)
         : format === 'mp4'
@@ -1467,6 +1751,7 @@
 
   function load(images, baseName) {
     stopPreviewLoop();
+    clearInterpolationCaches();
 
     state.frames = images.map((img) => ({ img, dx: 0, dy: 0 }));
     state.W = images[0].naturalWidth;
@@ -1517,6 +1802,7 @@
 
   function reset() {
     stopPreviewLoop();
+    clearInterpolationCaches();
     state.drag = null;
     state.frames = [];
     state.baseOrder = [];

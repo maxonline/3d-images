@@ -183,8 +183,8 @@ see below) calling `drawOrderEntry(ctx, entry, ...)` once per entry, instead
 of the old two fixed calls. `buildAnimatedWebp` needed zero changes to
 support any of this — it already accepted an arbitrary-length frame array.
 
-**Interpolated (tweened) frames — smooths the flip animation via linear
-shift+crossfade, not real optical flow.** The "Interpolated frames" slider
+**Interpolated (tweened) frames — real optical flow (OpenCV.js), with a
+rigid shift+crossfade fallback.** The "Interpolated frames" slider
 (`state.interpolationCount`, 0–10, any frame count) inserts `k` synthesized
 in-between frames between every consecutive pair in `state.baseOrder` via
 `withInterpolation(order, k)`, producing entries of the form `{a, b, t}`
@@ -195,35 +195,88 @@ every frame count and wasn't something worth silently also changing.
 `drawOrderEntry` is the single dispatcher every consumer of `state.order`
 goes through: a plain number still means "draw this real frame" exactly as
 before (so `state.interpolationCount === 0`, the default, is byte-for-byte
-identical to pre-interpolation behavior), while an `{a,b,t}` object means
-"draw a synthesized blend" via `drawInterpolatedFrame`. That function
-linearly interpolates the rigid alignment offset between frames `a` and
-`b`, then draws **both** frames' raw pixels through that *same* interpolated
-offset (`sourceRectFor`'s new optional third `offsetOverride` param) — `a`
-opaque as the base layer, `b` alpha-blended on top at `globalAlpha =
-entry.t`. That sequencing (base fully opaque, THEN the top layer at alpha
-`t` — not the base at `1-t`) is required to get Porter-Duff source-over
-compositing to work out to the correct linear blend `B*t + A*(1-t)`; it's
-the same sequencing `drawRunningAverageStack` already relies on elsewhere
-in this file for its provably-exact running-average alignment backdrop.
-Since content at different real-world depths has different true parallax
-(the rigid single-offset model this whole app already uses for alignment,
-not a new limitation introduced here), a blended frame is only seamless
-near whatever the alignment point was — anything closer or farther shows
-mild double-exposure ghosting proportional to its actual parallax. This is
-an accepted, documented approximation, not a bug: real motion interpolation
-would need per-pixel optical flow, which isn't feasible here without a
-large new (and slow, client-side) ML dependency, against this app's
-vendor-light philosophy. **Provably safe with no new bounds-checking**:
-because `state.crop` is already clamped inside the overlap of every
-confirmed frame's *real* offset, and an interpolated offset always lies
-between two offsets already proven safe for their respective source images,
-sampling either contributing image through that interpolated offset is
-guaranteed to stay within its native bounds. Pixel adjustments/anaglyph
-tint are applied once to the *composited* result (`applyDestAdjustmentsAndTint`,
-split out of the old single `drawAdjustedFrame` body) rather than per
-layer, which is both simpler and correct — adjustments should be uniform
-across the output regardless of which frame(s) contributed a given pixel.
+identical to pre-interpolation behavior); an `{a,b,t}` object draws a cached
+optical-flow-warped frame if one's ready (`interpFrameCache`), else the
+**rigid fallback** (`drawInterpolatedFrameRigid`, the original technique
+from before this session's optical-flow pass): linearly interpolate the
+rigid alignment offset between `a` and `b`, then draw **both** frames' raw
+pixels through that *same* interpolated offset (`sourceRectFor`'s optional
+third `offsetOverride` param) — `a` opaque as the base layer, `b`
+alpha-blended on top at `globalAlpha = entry.t`. (That sequencing — base
+fully opaque, THEN the top layer at alpha `t`, not the base at `1-t` — is
+required to get Porter-Duff source-over compositing to work out to the
+correct linear blend `B*t + A*(1-t)`; the same sequencing
+`drawRunningAverageStack` already relies on elsewhere in this file.) The
+rigid technique treats the whole frame as one flat plane, so anything off
+the alignment plane shows double-exposure ghosting — it's kept only as an
+**instant placeholder** (shown the moment the slider moves, before that
+entry's real optical-flow frame has finished computing) and a **resilience
+fallback** (if the library fails to load, e.g. offline). Pixel adjustments/
+anaglyph tint are applied once to the *composited* result
+(`applyDestAdjustmentsAndTint`, split out of the old single
+`drawAdjustedFrame` body) rather than per layer either way, which is both
+simpler and correct — adjustments should be uniform across the output
+regardless of which frame(s)/technique contributed a given pixel.
+
+**The real optical-flow path (`getFlowForPair`/`getInterpolatedCanvas`,
+OpenCV.js's Farneback dense flow).** Real per-pixel motion estimation was
+worth trying because the rigid technique's flat-plane assumption is exactly
+what a stereo photo's foreground/background parallax mismatch breaks —
+verified concretely: the same real test photo showed clear double-exposure
+ghosting on a close subject with the rigid technique, and a sharp,
+ghost-free result with this one. `getFlowForPair(a, b)` computes one
+Farneback flow field between `a` and `b`'s *cropped* content (grayscale,
+`cv.calcOpticalFlowFarneback`), cached per pair since flow doesn't depend
+on `t`; `getInterpolatedCanvas(a, b, t)` builds the actual in-between frame
+by warping `a` forward by `t * flow` and `b` backward by `(1-t) * flow`
+(both via `cv.remap`, an inverse/backward mapping) then blending by `t` —
+the standard "one flow field, two warps" simple-optical-flow-interpolation
+technique, rather than computing flow in both directions. **Runs at a
+capped working resolution** (`FLOW_WORK_DIM = 640` on the longer side, not
+the native crop size) — remap/flow cost scales with pixel count, and this
+keeps one pair's prep well under a few seconds instead of potentially tens
+of seconds at real camera resolution; only the *interpolated* frames are
+capped this way, the real endpoint frames on either side stay full native
+resolution. Cached results (`flowPairCache`, `interpFrameCache`, keyed
+`"a-b"` / `"a-b-t"`) are cleared (`clearInterpolationCaches`) whenever
+anything the flow was computed from changes — a new upload (`load`/`reset`),
+any alignment-drag or crop-resize-drag end, or an arrow-key nudge — since
+those all change the cropped pixel content flow is computed from.
+
+**OpenCV.js is loaded from a CDN, not vendored — a deliberate exception to
+this app's usual "vendor everything into web/lib/" rule**, and only lazily,
+the first time interpolation is actually turned on (never a blocking
+page-load dependency the way gif.js/mp4-muxer.js are). The browser build
+(`@techstark/opencv-js`, pinned version in `OPENCV_CDN_URL`) is ~13MB —
+its WASM binary embedded inline as a JS string — far larger than anything
+else this project has ever committed; given this whole feature is an
+experiment the user explicitly asked to try, committing that much generated
+code to git felt wrong. If the technique proves worth keeping permanently,
+self-hosting it should be reconsidered then. **`window.cv` is a Promise,
+not the resolved module — this was a real bug, not a style choice.** Most
+Emscripten/OpenCV.js builds signal readiness via a synchronous `Module`
+object plus a `cv.onRuntimeInitialized` callback; this particular build's
+UMD wrapper (`root.cv = factory()`) instead assigns the *Promise itself* to
+`window.cv`, which only resolves to the real module once the WASM runtime
+finishes initializing. `loadOpenCv()` first checks whether `window.cv` is
+thenable and awaits it; the `onRuntimeInitialized` handling is kept as a
+fallback for other opencv.js builds, but wasn't what this specific CDN
+build actually needed — confirmed by direct inspection (`cv.Mat` stayed
+`undefined` forever using only the callback path; switching to awaiting the
+promise resolved it in ~2 seconds). If you swap CDN builds/versions, check
+which shape you actually got before assuming either path works.
+
+**Preview upgrades in place; export always waits.** Turning the slider up
+(or editing the order textbox, or the debounced `scheduleInterpolationPrep`
+it shares) sets `state.order` to the new `{a,b,t}` entries *immediately* —
+the live preview draws the instant rigid fallback for anything not yet
+cached, then seamlessly starts drawing the real optical-flow frame the
+moment `prepareInterpolatedFrames` finishes it in the background, with zero
+extra state-tracking (the cache check in `drawOrderEntry` just starts
+succeeding). `generateOutput`, by contrast, explicitly `await`s
+`prepareInterpolatedFrames(state.order)` before drawing anything, so an
+exported file's quality never depends on timing luck the way a live preview
+frame reasonably can.
 
 **Anaglyph tint only makes sense for 2 clean views.** `updateColorModeAvailability`
 disables that radio option (and force-switches to Normal if it was somehow
@@ -237,13 +290,15 @@ consumers via one dispatcher.** `drawFrameRaw` (crop, optional offset
 override, optional alpha — no adjustments) and `applyDestAdjustmentsAndTint`
 (brightness/contrast/hue/grayscale/sepia via hand-rolled pixel math →
 optional red/cyan anaglyph tint via `multiply` composite) are the two
-halves `drawAdjustedFrame` (single real frame) and `drawInterpolatedFrame`
-(blended pair) each combine differently; `drawOrderEntry` picks between
-those two based on whether a `state.order` entry is a plain number or an
-`{a,b,t}` object. All of the live preview loop, `generateGif`,
-`generateWebp`, and `generateMp4` call `drawOrderEntry`, never
-`drawAdjustedFrame` directly — this guarantees the preview never drifts
-from the actual exported file, now for interpolated frames too.
+halves `drawAdjustedFrame` (single real frame) and `drawInterpolatedFrameRigid`
+(rigid-shift blended pair, see below) each combine differently;
+`drawOrderEntry` is the single dispatcher every consumer goes through — a
+plain number means `drawAdjustedFrame`, an `{a,b,t}` object means the
+cached optical-flow frame if ready, else `drawInterpolatedFrameRigid`. All
+of the live preview loop, `generateGif`, `generateWebp`, and `generateMp4`
+call `drawOrderEntry`, never `drawAdjustedFrame` directly — this guarantees
+the preview never drifts from the actual exported file, now for
+interpolated frames too.
 
 **Adjustments are manual pixel math, not `ctx.filter` — this was a real bug,
 not a style choice.** It used to build a `ctx.filter = 'brightness(...)
