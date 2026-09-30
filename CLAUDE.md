@@ -407,6 +407,63 @@ build actually needed — confirmed by direct inspection (`cv.Mat` stayed
 promise resolved it in ~2 seconds). If you swap CDN builds/versions, check
 which shape you actually got before assuming either path works.
 
+**`loadOpenCv()` has a 30s timeout, and a failure is never cached
+permanently — both specifically for phones on real mobile networks, not
+just desktop-testing hygiene.** A 13MB download can legitimately take a
+while on slow/cellular connections, but with no timeout at all, a
+connection that *stalls* (rather than cleanly erroring, which
+`script.onerror` already handled) would leave "Preparing optical-flow
+interpolation…" stuck forever with no fallback ever kicking in —
+`OPENCV_LOAD_TIMEOUT_MS` rejects after 30s so the existing rigid-fallback
+path still kicks in either way. Separately, `cvReadyPromise` (the
+memoized load promise) is reset to `null` in a `.catch()` on any failure —
+timeout or otherwise — rather than permanently caching the rejection: a
+transient network hiccup shouldn't lock the rest of the session out of
+real optical-flow interpolation forever, so the *next* time interpolation
+prep runs (the user nudges the slider again, or `generateOutput` awaits
+preparation before export) this retries a fresh load rather than replaying
+the same rejected promise. Verified concretely via Playwright route
+interception simulating a stalled connection, not just reasoned about:
+confirmed the 30s timeout actually fires (not instant, not never) and
+falls back correctly, and that a later attempt (once the simulated network
+recovers) really does issue a brand-new request and succeeds — the first
+attempt at verifying this hit two test-harness artifacts worth knowing
+about if you touch this code: (1) piling up multiple *simultaneously*
+stalled requests to the same host in a test doesn't behave like a real
+stalled TCP connection — the OS/network stack eventually resets a real
+one, freeing the browser's per-host connection slot, but an unresolved
+`Promise` in a Playwright route handler holds that slot forever, so a
+later legitimate request can end up queued behind ones that will never
+complete; test one stalled request at a time. (2) A test's own
+wait-condition can trivially self-satisfy on *stale* status text left over
+from a previous attempt (e.g. `status.includes("Couldn't load")` is
+already true going into a second attempt if the first one's failure text
+was never cleared) — clear it explicitly before waiting on the same
+condition again, or the test passes without ever having waited for the
+real thing to happen.
+
+**Mobile platform coverage was verified via Playwright's device emulation
+(WebKit + an iPhone profile for iOS Safari, Chromium + a Pixel profile for
+Android Chrome), not just desktop browsers** — both produced genuine,
+ghost-free optical-flow interpolated output. Worth being honest about the
+limits of that verification, though: Playwright's `webkit` is a modern
+*desktop* WebKit build (version 26.x at the time this was checked), not
+literally iOS Safari — it shares the same JS/rendering engine and is a
+reasonable proxy for API-level compatibility (WASM support, Canvas
+behavior), but doesn't replicate a real iPhone's actual memory ceiling or
+gate on the *device's* real WebKit version the way a genuine minimum-iOS
+version check would. The emulated device's UA string can claim an old iOS
+version while the underlying engine is actually current — Playwright only
+fakes the UA/viewport/touch, not the engine build — so this can't verify
+behavior on a real OLD iOS Safari (e.g. pre-16.4, before WASM SIMD, which
+this OpenCV.js build likely needs). If that ever needs confirming for
+real, it needs an actual older device or a matching real-Safari test lab,
+not device emulation. Either way, the rigid-technique fallback (see above)
+means an incompatible/old browser degrades gracefully rather than
+breaking — this was already true before this round of hardening, just
+worth restating here since it's the actual answer for genuinely
+unsupported devices, not something the timeout/retry work changes.
+
 **Preview upgrades in place; export always waits.** Turning the slider up
 (or editing the order textbox, or the debounced `scheduleInterpolationPrep`
 it shares) sets `state.order` to the new `{a,b,t}` entries *immediately* —

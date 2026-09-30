@@ -602,11 +602,26 @@
   // gif.js/mp4-muxer.js. If this technique proves worth keeping
   // permanently, self-hosting it in web/lib/ should be reconsidered then.
   const OPENCV_CDN_URL = 'https://unpkg.com/@techstark/opencv-js@5.0.0-release.1/dist/opencv.js';
+  // Generous, but not unbounded — a 13MB download over a slow/flaky mobile
+  // connection can legitimately take a while, but with NO timeout at all a
+  // connection that stalls (rather than cleanly failing, which script.onerror
+  // already handles) would leave "Preparing optical-flow interpolation…"
+  // stuck forever with no fallback ever kicking in. This is a real concern
+  // specifically for phones on cellular, not just a desktop-testing nicety.
+  const OPENCV_LOAD_TIMEOUT_MS = 30000;
   let cvReadyPromise = null;
 
   function loadOpenCv() {
     if (cvReadyPromise) return cvReadyPromise;
     cvReadyPromise = new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error('Timed out loading the optical-flow library (slow connection?)'));
+      }, OPENCV_LOAD_TIMEOUT_MS);
+      const settle = (fn, arg) => {
+        clearTimeout(timeoutId);
+        fn(arg);
+      };
+
       const script = document.createElement('script');
       script.src = OPENCV_CDN_URL;
       script.onload = () => {
@@ -616,19 +631,27 @@
         // builds instead expose the module synchronously and signal
         // readiness via cv.onRuntimeInitialized; handle both shapes.)
         if (window.cv && typeof window.cv.then === 'function') {
-          window.cv.then((readyCv) => {
-            window.cv = readyCv;
-            resolve(readyCv);
-          }, reject);
+          window.cv.then(
+            (readyCv) => { window.cv = readyCv; settle(resolve, readyCv); },
+            (err) => settle(reject, err)
+          );
         } else if (window.cv && window.cv.Mat) {
-          resolve(window.cv);
+          settle(resolve, window.cv);
         } else {
           window.cv = window.cv || {};
-          window.cv['onRuntimeInitialized'] = () => resolve(window.cv);
+          window.cv['onRuntimeInitialized'] = () => settle(resolve, window.cv);
         }
       };
-      script.onerror = () => reject(new Error("Could not load the optical-flow library from the CDN — check your connection."));
+      script.onerror = () => settle(reject, new Error("Could not load the optical-flow library from the CDN — check your connection."));
       document.head.appendChild(script);
+    }).catch((err) => {
+      // Don't cache a failed attempt forever — a timeout or transient
+      // network error shouldn't permanently lock this session out of real
+      // optical-flow interpolation; the next time interpolation prep runs
+      // (e.g. the user nudges the slider again), this retries fresh rather
+      // than replaying the same rejected promise.
+      cvReadyPromise = null;
+      throw err;
     });
     return cvReadyPromise;
   }
