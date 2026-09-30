@@ -46,17 +46,7 @@
       <div class="thumb-strip" id="thumb-strip"></div>
     </section>
 
-    <div class="align-row">
-      <div class="align-main">
-        <canvas id="align-canvas" tabindex="0" aria-label="Alignment and crop editor"></canvas>
-      </div>
-      <div class="align-magnifier" id="align-magnifier-col">
-        <canvas id="magnifier-canvas" width="320" height="320" aria-label="Zoomed view under cursor"></canvas>
-        <p class="hint" id="align-offset-label">Offset: 0, 0 px</p>
-      </div>
-    </div>
-
-    <div id="crop-export-panel" hidden>
+    <section id="crop-ratio-section" hidden>
       <fieldset class="radio-group">
         <legend>Crop aspect ratio</legend>
         <label><input type="radio" name="crop-ratio" value="none" checked> Free</label>
@@ -70,9 +60,20 @@
         <label><input type="radio" name="crop-ratio" value="16:9"> 16:9</label>
         <label><input type="radio" name="crop-ratio" value="1.91:1"> 1.91:1</label>
       </fieldset>
+    </section>
 
+    <div class="align-row">
+      <div class="align-main">
+        <canvas id="align-canvas" tabindex="0" aria-label="Alignment and crop editor"></canvas>
+      </div>
+      <div class="align-magnifier" id="align-magnifier-col">
+        <canvas id="magnifier-canvas" width="320" height="320" aria-label="Zoomed view under cursor"></canvas>
+        <p class="hint" id="align-offset-label">Offset: 0, 0 px</p>
+      </div>
+    </div>
+
+    <div id="crop-export-panel" hidden>
       <h2>Preview</h2>
-      <p class="hint">This preview shows roughly what the GIF will look like.</p>
       <canvas id="preview-canvas"></canvas>
 
       <div class="control-row">

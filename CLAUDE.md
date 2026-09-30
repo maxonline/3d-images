@@ -81,7 +81,14 @@ not the live N-way intersection — an accepted simplification).
 
 **Crop aspect-ratio lock (`state.cropRatio`, the "Crop aspect ratio" radio
 group) reuses the same clamp functions rather than being a separate code
-path.** `clampResizeCrop` computes an anchor point (the corner opposite the
+path.** The radio group itself lives in its own `#crop-ratio-section`,
+positioned directly above the align canvas (not inside `#crop-export-panel`,
+where the rest of the crop/preview/export UI lives) so it reads as part of
+setting up the crop before looking at the canvas — but it's still gated by
+the exact same `ready`-mode visibility flag as `#crop-export-panel` in
+`applyModeVisibility` (`cropRatioSectionEl.hidden = !ready`), just a
+separate element toggled alongside it, since picking a ratio before a crop
+rect even exists wouldn't make sense. `clampResizeCrop` computes an anchor point (the corner opposite the
 one being dragged, which never moves) and a free-form candidate size from
 the raw drag, exactly as before; when a ratio is locked it then derives one
 dimension from the other via that ratio and scales both down uniformly

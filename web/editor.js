@@ -14,6 +14,7 @@
   const thumbStripEl = document.getElementById('thumb-strip');
   const alignHintEl = document.getElementById('align-hint');
 
+  const cropRatioSectionEl = document.getElementById('crop-ratio-section');
   const cropExportPanelEl = document.getElementById('crop-export-panel');
 
   const orderSectionEl = document.getElementById('order-section');
@@ -1190,6 +1191,7 @@
     const multi = frameCount() > 2;
 
     frameThumbSectionEl.hidden = !multi;
+    cropRatioSectionEl.hidden = !ready;
     cropExportPanelEl.hidden = !ready;
     orderSectionEl.hidden = !(ready && multi);
   }
