@@ -170,28 +170,80 @@ offset, confirm it, then select frame 2 — `currentOverlapRect()` must still
 reflect frame 3's offset afterward. If you touch either of these functions,
 re-run that scenario, not just the "click 1, 2, 3 in order" happy path.
 
-**Animation order (`state.order`, 3+ frames only).** A validated,
-comma-separated 1-indexed text field (`#order-input`, `parseOrder`/
-`formatOrder`) drives both the live preview's cycling and the final export
-frame sequence — both `generateGif` and `generateWebp` now just loop over
-`state.order` calling `drawAdjustedFrame(ctx, frameIndex, ...)` once per
-entry, instead of the old two fixed calls. `defaultOrder(n)` produces a
-pendulum bounce (`[0..n-1, n-2..1]`, which is `[0,1]` — i.e. today's old
-plain alternation — when `n===2`, and `[0,1,2,3,2,1]` → displayed as
-`"1,2,3,4,3,2"` when `n===4`). `buildAnimatedWebp` needed zero changes to
-support this — it already accepted an arbitrary-length frame array.
+**Animation order (`state.order`/`state.baseOrder`, 3+ frames only for the
+textbox — see interpolation below for 2-frame animation control).** A
+validated, comma-separated 1-indexed text field (`#order-input`,
+`parseOrder`/`formatOrder`) drives `state.baseOrder`, the *real* frame
+sequence; `defaultOrder(n)` produces a pendulum bounce (`[0..n-1, n-2..1]`,
+which is `[0,1]` — i.e. today's old plain alternation — when `n===2`, and
+`[0,1,2,3,2,1]` → displayed as `"1,2,3,4,3,2"` when `n===4`). `generateGif`/
+`generateWebp`/`generateMp4`/the live preview loop all loop over
+`state.order` (== `withInterpolation(state.baseOrder, state.interpolationCount)`,
+see below) calling `drawOrderEntry(ctx, entry, ...)` once per entry, instead
+of the old two fixed calls. `buildAnimatedWebp` needed zero changes to
+support any of this — it already accepted an arbitrary-length frame array.
 
-**Anaglyph tint only makes sense for 2 views.** `updateColorModeAvailability`
+**Interpolated (tweened) frames — smooths the flip animation via linear
+shift+crossfade, not real optical flow.** The "Interpolated frames" slider
+(`state.interpolationCount`, 0–10, any frame count) inserts `k` synthesized
+in-between frames between every consecutive pair in `state.baseOrder` via
+`withInterpolation(order, k)`, producing entries of the form `{a, b, t}`
+(`t` strictly in `(0,1)`) interleaved with the existing plain frame-index
+numbers — deliberately **not** also smoothing the implicit loop-back from
+the last entry to the first, since that's already a hard cut today for
+every frame count and wasn't something worth silently also changing.
+`drawOrderEntry` is the single dispatcher every consumer of `state.order`
+goes through: a plain number still means "draw this real frame" exactly as
+before (so `state.interpolationCount === 0`, the default, is byte-for-byte
+identical to pre-interpolation behavior), while an `{a,b,t}` object means
+"draw a synthesized blend" via `drawInterpolatedFrame`. That function
+linearly interpolates the rigid alignment offset between frames `a` and
+`b`, then draws **both** frames' raw pixels through that *same* interpolated
+offset (`sourceRectFor`'s new optional third `offsetOverride` param) — `a`
+opaque as the base layer, `b` alpha-blended on top at `globalAlpha =
+entry.t`. That sequencing (base fully opaque, THEN the top layer at alpha
+`t` — not the base at `1-t`) is required to get Porter-Duff source-over
+compositing to work out to the correct linear blend `B*t + A*(1-t)`; it's
+the same sequencing `drawRunningAverageStack` already relies on elsewhere
+in this file for its provably-exact running-average alignment backdrop.
+Since content at different real-world depths has different true parallax
+(the rigid single-offset model this whole app already uses for alignment,
+not a new limitation introduced here), a blended frame is only seamless
+near whatever the alignment point was — anything closer or farther shows
+mild double-exposure ghosting proportional to its actual parallax. This is
+an accepted, documented approximation, not a bug: real motion interpolation
+would need per-pixel optical flow, which isn't feasible here without a
+large new (and slow, client-side) ML dependency, against this app's
+vendor-light philosophy. **Provably safe with no new bounds-checking**:
+because `state.crop` is already clamped inside the overlap of every
+confirmed frame's *real* offset, and an interpolated offset always lies
+between two offsets already proven safe for their respective source images,
+sampling either contributing image through that interpolated offset is
+guaranteed to stay within its native bounds. Pixel adjustments/anaglyph
+tint are applied once to the *composited* result (`applyDestAdjustmentsAndTint`,
+split out of the old single `drawAdjustedFrame` body) rather than per
+layer, which is both simpler and correct — adjustments should be uniform
+across the output regardless of which frame(s) contributed a given pixel.
+
+**Anaglyph tint only makes sense for 2 clean views.** `updateColorModeAvailability`
 disables that radio option (and force-switches to Normal if it was somehow
-selected) whenever `frameCount() > 2`; the tint itself, when active, keys off
+selected) whenever `frameCount() > 2` OR `state.interpolationCount > 0` — a
+blended interpolated frame isn't a clean single view either, same reasoning
+extended to the newer case. The tint itself, when active, keys off
 `frameIndex % 2` rather than a `'left'`/`'right'` string.
 
-**One shared frame-drawing function, three consumers.** `drawAdjustedFrame`
-(crop → brightness/contrast/hue/grayscale/sepia via hand-rolled pixel math →
-optional red/cyan anaglyph tint via `multiply` composite) is called by the
-live preview loop, and by both `generateGif`/`generateWebp` at full export
-resolution. This guarantees the preview never drifts from the actual
-exported file.
+**Two-layer split for frame drawing: raw draw vs. adjust/tint, four
+consumers via one dispatcher.** `drawFrameRaw` (crop, optional offset
+override, optional alpha — no adjustments) and `applyDestAdjustmentsAndTint`
+(brightness/contrast/hue/grayscale/sepia via hand-rolled pixel math →
+optional red/cyan anaglyph tint via `multiply` composite) are the two
+halves `drawAdjustedFrame` (single real frame) and `drawInterpolatedFrame`
+(blended pair) each combine differently; `drawOrderEntry` picks between
+those two based on whether a `state.order` entry is a plain number or an
+`{a,b,t}` object. All of the live preview loop, `generateGif`,
+`generateWebp`, and `generateMp4` call `drawOrderEntry`, never
+`drawAdjustedFrame` directly — this guarantees the preview never drifts
+from the actual exported file, now for interpolated frames too.
 
 **Adjustments are manual pixel math, not `ctx.filter` — this was a real bug,
 not a style choice.** It used to build a `ctx.filter = 'brightness(...)

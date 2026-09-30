@@ -82,6 +82,12 @@
         <span class="unit">fps</span>
       </div>
       <div class="control-row">
+        <label for="interp-slider">Interpolated frames</label>
+        <input type="range" id="interp-slider" min="0" max="10" step="1" value="0">
+        <input type="number" id="interp-value" class="value-input" min="0" max="10" step="1" value="0">
+      </div>
+      <p class="hint">Blends smoothly toward the next frame instead of a hard cut — a linear approximation, not true motion tracking.</p>
+      <div class="control-row">
         <label for="brightness-slider">Brightness</label>
         <input type="range" id="brightness-slider" min="-100" max="100" step="1" value="0">
         <input type="number" id="brightness-value" class="value-input" min="-100" max="100" step="1" value="0">

@@ -31,6 +31,8 @@
 
   const fpsSlider = document.getElementById('fps-slider');
   const fpsValue = document.getElementById('fps-value');
+  const interpSlider = document.getElementById('interp-slider');
+  const interpValue = document.getElementById('interp-value');
 
   const scaleSlider = document.getElementById('scale-slider');
   const scaleValue = document.getElementById('scale-value');
@@ -160,7 +162,9 @@
     fps: 8,
     outputScalePercent: 100,
 
-    order: [], // 0-indexed frame-index sequence driving preview + export
+    baseOrder: [], // 0-indexed real-frame sequence (defaultOrder() or parseOrder() output)
+    interpolationCount: 0, // K in-between frames inserted per step of baseOrder
+    order: [], // withInterpolation(baseOrder, interpolationCount) — what preview + export actually draw
 
     mode: 'ready', // 'stepping' | 'ready'. Always 'ready' when frames.length === 2.
     alignStep: {
@@ -381,9 +385,11 @@
     outputSizeLabel.textContent = `Output size: ${w} × ${h} px`;
   }
 
-  function sourceRectFor(frameIndex, crop) {
+  function sourceRectFor(frameIndex, crop, offsetOverride) {
     const f = state.frames[frameIndex];
-    return { sx: crop.x - f.dx, sy: crop.y - f.dy, sw: crop.w, sh: crop.h };
+    const dx = offsetOverride ? offsetOverride.dx : f.dx;
+    const dy = offsetOverride ? offsetOverride.dy : f.dy;
+    return { sx: crop.x - dx, sy: crop.y - dy, sw: crop.w, sh: crop.h };
   }
 
   function clamp255(v) {
@@ -458,15 +464,26 @@
     }
   }
 
-  // Draws one adjusted/cropped/tinted frame into destCtx. Used by both the
-  // live preview loop and the final full-resolution GIF/WebP export, so the
-  // preview can never drift from the actual exported file.
-  function drawAdjustedFrame(destCtx, frameIndex, destX, destY, destW, destH) {
+  // Draws one frame's cropped source pixels into destCtx, unadjusted — no
+  // pixel math, no tint. offsetOverride lets a frame be sampled as if it
+  // sat at some other (dx, dy) than its own real alignment offset, which is
+  // how drawInterpolatedFrame below synthesizes an in-between frame: both
+  // contributing frames get drawn through the SAME offset override, so they
+  // land in registration with each other for the blend.
+  function drawFrameRaw(destCtx, frameIndex, destX, destY, destW, destH, offsetOverride, alpha) {
     const f = state.frames[frameIndex];
-    const { sx, sy, sw, sh } = sourceRectFor(frameIndex, state.crop);
-
+    const { sx, sy, sw, sh } = sourceRectFor(frameIndex, state.crop, offsetOverride);
+    destCtx.save();
+    if (alpha != null) destCtx.globalAlpha = alpha;
     destCtx.drawImage(f.img, sx, sy, sw, sh, destX, destY, destW, destH);
+    destCtx.restore();
+  }
 
+  // Applies brightness/contrast/hue/color-mode + anaglyph tint to whatever
+  // is already drawn in destCtx's destX/destY/destW/destH region — shared by
+  // the single-frame and interpolated-blend draw paths below so adjustments
+  // are applied once to the final composited pixels, not per source layer.
+  function applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, frameIndexForTint) {
     const needsPixelAdjust = state.adjust.brightness !== 0 || state.adjust.contrast !== 0 ||
       state.adjust.hue !== 0 || state.adjust.colorMode === 'bw' || state.adjust.colorMode === 'sepia';
     if (needsPixelAdjust) {
@@ -480,9 +497,58 @@
     if (state.adjust.colorMode === 'anaglyph') {
       destCtx.save();
       destCtx.globalCompositeOperation = 'multiply';
-      destCtx.fillStyle = frameIndex % 2 === 0 ? TINT_LEFT : TINT_RIGHT;
+      destCtx.fillStyle = frameIndexForTint % 2 === 0 ? TINT_LEFT : TINT_RIGHT;
       destCtx.fillRect(destX, destY, destW, destH);
       destCtx.restore();
+    }
+  }
+
+  // Draws one adjusted/cropped/tinted frame into destCtx. Used by both the
+  // live preview loop and the final full-resolution GIF/WebP/MP4 export, so
+  // the preview can never drift from the actual exported file.
+  function drawAdjustedFrame(destCtx, frameIndex, destX, destY, destW, destH) {
+    drawFrameRaw(destCtx, frameIndex, destX, destY, destW, destH, null, null);
+    applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, frameIndex);
+  }
+
+  // Synthesizes an in-between frame at entry.t (0..1) between real frames
+  // entry.a and entry.b: linearly interpolate the rigid alignment offset
+  // between them, then draw both frames' raw pixels through that SAME
+  // offset — entry.a opaque as the base, entry.b alpha-blended on top at
+  // globalAlpha = entry.t. Sequencing matters: drawing the base fully
+  // opaque (not at alpha 1-t) then the top at alpha t is what makes
+  // Porter-Duff source-over compositing work out to the correct linear
+  // blend B*t + A*(1-t) — the same sequencing drawRunningAverageStack
+  // already relies on elsewhere in this file for its running-average
+  // ghosted alignment backdrop.
+  //
+  // This is a linear shift+crossfade approximation, not true optical-flow
+  // motion interpolation — there's no per-pixel motion estimation, just the
+  // same single rigid per-frame offset the rest of the app already uses for
+  // alignment. It's provably safe with no new bounds-checking: since
+  // state.crop is already clamped inside the overlap of every confirmed
+  // frame's REAL offset, and entry.t's interpolated offset always lies
+  // between two offsets already proven safe, sampling either source image
+  // through that interpolated offset always stays within its native bounds.
+  function drawInterpolatedFrame(destCtx, entry, destX, destY, destW, destH) {
+    const fa = state.frames[entry.a];
+    const fb = state.frames[entry.b];
+    const dx = fa.dx + (fb.dx - fa.dx) * entry.t;
+    const dy = fa.dy + (fb.dy - fa.dy) * entry.t;
+    const offset = { dx, dy };
+    drawFrameRaw(destCtx, entry.a, destX, destY, destW, destH, offset, null);
+    drawFrameRaw(destCtx, entry.b, destX, destY, destW, destH, offset, entry.t);
+    applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, entry.a);
+  }
+
+  // Single entry point for anything consuming state.order: an entry is
+  // either a plain 0-indexed frame number (real frame, drawn unchanged) or
+  // an { a, b, t } interpolation descriptor (see withInterpolation).
+  function drawOrderEntry(destCtx, entry, destX, destY, destW, destH) {
+    if (typeof entry === 'number') {
+      drawAdjustedFrame(destCtx, entry, destX, destY, destW, destH);
+    } else {
+      drawInterpolatedFrame(destCtx, entry, destX, destY, destW, destH);
     }
   }
 
@@ -883,8 +949,9 @@
     recomputeAlignScale();
     recomputePreviewScale();
 
-    state.order = defaultOrder(frameCount());
-    orderInput.value = formatOrder(state.order);
+    state.baseOrder = defaultOrder(frameCount());
+    orderInput.value = formatOrder(state.baseOrder);
+    state.order = withInterpolation(state.baseOrder, state.interpolationCount);
     orderErrorEl.hidden = true;
     orderValid = true;
 
@@ -936,8 +1003,8 @@
 
   function drawPreviewFrame() {
     previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-    const frameIndex = state.order[state.previewOrderIdx % state.order.length];
-    drawAdjustedFrame(previewCtx, frameIndex, 0, 0, previewCanvas.width, previewCanvas.height);
+    const entry = state.order[state.previewOrderIdx % state.order.length];
+    drawOrderEntry(previewCtx, entry, 0, 0, previewCanvas.width, previewCanvas.height);
   }
 
   function startPreviewLoop() {
@@ -988,6 +1055,11 @@
   const applyFps = linkSliderWithNumber(fpsSlider, fpsValue, (v) => {
     state.fps = v;
   });
+  const applyInterpolation = linkSliderWithNumber(interpSlider, interpValue, (v) => {
+    state.interpolationCount = v;
+    state.order = withInterpolation(state.baseOrder, v);
+    updateColorModeAvailability();
+  });
   const applyBrightness = linkSliderWithNumber(brightnessSlider, brightnessValue, (v) => {
     state.adjust.brightness = v;
   });
@@ -1026,7 +1098,7 @@
   // more than 2 frames, falling back to Normal if it was somehow selected.
   function updateColorModeAvailability() {
     const anaglyphRadio = document.querySelector('input[name="color-mode"][value="anaglyph"]');
-    const disable = frameCount() > 2;
+    const disable = frameCount() > 2 || state.interpolationCount > 0;
     anaglyphRadio.disabled = disable;
     anaglyphRadio.closest('label').classList.toggle('disabled-option', disable);
     if (disable && anaglyphRadio.checked) {
@@ -1045,6 +1117,26 @@
 
   function formatOrder(order) {
     return order.map((i) => i + 1).join(',');
+  }
+
+  // Expands a real (0-indexed) frame order into one with k interpolated
+  // in-between frames inserted between each consecutive pair — e.g.
+  // withInterpolation([0,1], 2) -> [0, {a:0,b:1,t:1/3}, {a:0,b:1,t:2/3}, 1].
+  // Deliberately does NOT also smooth the implicit loop-back from the last
+  // entry to the first (already a hard cut today, for every frame count —
+  // left as-is rather than silently changing that separate behavior too).
+  function withInterpolation(order, k) {
+    if (k <= 0 || order.length < 2) return order.slice();
+    const result = [order[0]];
+    for (let i = 0; i < order.length - 1; i++) {
+      const a = order[i];
+      const b = order[i + 1];
+      for (let s = 1; s <= k; s++) {
+        result.push({ a, b, t: s / (k + 1) });
+      }
+      result.push(b);
+    }
+    return result;
   }
 
   function parseOrder(text, n) {
@@ -1071,7 +1163,8 @@
     if (result.error) {
       orderErrorEl.textContent = result.error;
     } else {
-      state.order = result.order;
+      state.baseOrder = result.order;
+      state.order = withInterpolation(state.baseOrder, state.interpolationCount);
     }
     updateGenerateButtonsDisabled();
   });
@@ -1207,8 +1300,8 @@
       height: canvas.height,
     });
 
-    for (const frameIndex of state.order) {
-      drawAdjustedFrame(ctx, frameIndex, 0, 0, canvas.width, canvas.height);
+    for (const entry of state.order) {
+      drawOrderEntry(ctx, entry, 0, 0, canvas.width, canvas.height);
       gif.addFrame(canvas, { copy: true, delay });
     }
 
@@ -1225,8 +1318,8 @@
     const WEBP_QUALITY = 0.92;
 
     const frames = [];
-    for (const frameIndex of state.order) {
-      drawAdjustedFrame(ctx, frameIndex, 0, 0, canvas.width, canvas.height);
+    for (const entry of state.order) {
+      drawOrderEntry(ctx, entry, 0, 0, canvas.width, canvas.height);
       const blob = await canvasToBlob(canvas, 'image/webp', WEBP_QUALITY);
       if (blob.type !== 'image/webp') {
         throw new Error("This browser can't encode WebP (common on iOS, where every browser uses Safari's engine) — use Generate GIF instead.");
@@ -1287,7 +1380,7 @@
     const durationMicros = delay * 1000;
     let timestamp = 0;
     for (let i = 0; i < state.order.length; i++) {
-      drawAdjustedFrame(ctx, state.order[i], 0, 0, width, height);
+      drawOrderEntry(ctx, state.order[i], 0, 0, width, height);
       const videoFrame = new VideoFrame(canvas, { timestamp, duration: durationMicros });
       videoEncoder.encode(videoFrame, { keyFrame: i === 0 });
       videoFrame.close();
@@ -1386,6 +1479,7 @@
     // control's value independently on a page reload, so the two can drift
     // apart (e.g. the number box stuck on a stale "0") if not resynced here.
     applyFps(Number(fpsSlider.value) || state.fps);
+    applyInterpolation(0);
 
     applyBrightness(0);
     applyContrast(0);
@@ -1425,6 +1519,8 @@
     stopPreviewLoop();
     state.drag = null;
     state.frames = [];
+    state.baseOrder = [];
+    state.interpolationCount = 0;
     state.order = [];
     state.mode = 'ready';
     state.alignStep = { current: 1, confirmed: [] };
