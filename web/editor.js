@@ -1218,7 +1218,7 @@
 
     state.baseOrder = defaultOrder(frameCount());
     orderInput.value = formatOrder(state.baseOrder);
-    state.order = withInterpolation(state.baseOrder, state.interpolationCount);
+    state.order = orderForRendering(state.baseOrder, state.interpolationCount);
     orderErrorEl.hidden = true;
     orderValid = true;
 
@@ -1324,7 +1324,7 @@
   });
   const applyInterpolation = linkSliderWithNumber(interpSlider, interpValue, (v) => {
     state.interpolationCount = v;
-    state.order = withInterpolation(state.baseOrder, v);
+    state.order = orderForRendering(state.baseOrder, v);
     updateColorModeAvailability();
     scheduleInterpolationPrep();
   });
@@ -1390,9 +1390,9 @@
   // Expands a real (0-indexed) frame order into one with k interpolated
   // in-between frames inserted between each consecutive pair — e.g.
   // withInterpolation([0,1], 2) -> [0, {a:0,b:1,t:1/3}, {a:0,b:1,t:2/3}, 1].
-  // Deliberately does NOT also smooth the implicit loop-back from the last
-  // entry to the first (already a hard cut today, for every frame count —
-  // left as-is rather than silently changing that separate behavior too).
+  // Only smooths transitions actually present in `order`; whether the
+  // implicit loop-back from the last entry to the first also needs
+  // smoothing is orderForRendering's job (below), not this function's.
   function withInterpolation(order, k) {
     if (k <= 0 || order.length < 2) return order.slice();
     const result = [order[0]];
@@ -1405,6 +1405,30 @@
       result.push(b);
     }
     return result;
+  }
+
+  // Appends the sequence's own first frame back onto its end, unless it's
+  // already there — turning e.g. [0,1] into [0,1,0], or the N-frame default
+  // pendulum [0,1,2,3,2,1] into [0,1,2,3,2,1,0]. A no-op when the order
+  // already ends where it started (nothing to close).
+  function closeLoopForInterpolation(order) {
+    if (order.length === 0 || order[order.length - 1] === order[0]) return order.slice();
+    return order.concat([order[0]]);
+  }
+
+  // What state.order actually gets set to: with interpolation off, the
+  // real order exactly as typed/defaulted, unchanged. With it on, the loop
+  // is closed first (see closeLoopForInterpolation) before expanding — so
+  // the animation is a genuine pendulum with NO hard cuts anywhere,
+  // including the wrap from the last frame back to the first, rather than
+  // just smoothing the transitions explicitly listed in baseOrder. This is
+  // requested/expected behavior specifically for interpolation — the
+  // non-interpolated default order (state.baseOrder, what the order
+  // textbox shows) is deliberately left alone; only ever closed here, for
+  // rendering.
+  function orderForRendering(baseOrder, k) {
+    if (k <= 0) return baseOrder.slice();
+    return withInterpolation(closeLoopForInterpolation(baseOrder), k);
   }
 
   function parseOrder(text, n) {
@@ -1432,7 +1456,7 @@
       orderErrorEl.textContent = result.error;
     } else {
       state.baseOrder = result.order;
-      state.order = withInterpolation(state.baseOrder, state.interpolationCount);
+      state.order = orderForRendering(state.baseOrder, state.interpolationCount);
       scheduleInterpolationPrep();
     }
     updateGenerateButtonsDisabled();

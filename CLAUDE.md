@@ -186,16 +186,36 @@ support any of this — it already accepted an arbitrary-length frame array.
 **Interpolated (tweened) frames — real optical flow (OpenCV.js), with a
 rigid shift+crossfade fallback.** The "Interpolated frames" slider
 (`state.interpolationCount`, 0–10, any frame count) inserts `k` synthesized
-in-between frames between every consecutive pair in `state.baseOrder` via
-`withInterpolation(order, k)`, producing entries of the form `{a, b, t}`
-(`t` strictly in `(0,1)`) interleaved with the existing plain frame-index
-numbers — deliberately **not** also smoothing the implicit loop-back from
-the last entry to the first, since that's already a hard cut today for
-every frame count and wasn't something worth silently also changing.
-`drawOrderEntry` is the single dispatcher every consumer of `state.order`
-goes through: a plain number still means "draw this real frame" exactly as
-before (so `state.interpolationCount === 0`, the default, is byte-for-byte
-identical to pre-interpolation behavior); an `{a,b,t}` object draws a cached
+in-between frames between every consecutive pair via `withInterpolation(order, k)`,
+producing entries of the form `{a, b, t}` (`t` strictly in `(0,1)`)
+interleaved with the existing plain frame-index numbers.
+
+**Turning interpolation on automatically closes the loop into a full
+pendulum — this was a deliberate follow-up request, not the original
+design.** `state.baseOrder` (what the order textbox shows, and what
+`state.order` is when `state.interpolationCount === 0`) is left exactly
+as-is — still just `defaultOrder(n)` or whatever was typed, with the same
+implicit hard-cut wrap from its last entry back to its first that's always
+existed. But whenever interpolation is actually on, `orderForRendering(baseOrder, k)`
+— not `withInterpolation` directly — is what actually gets assigned to
+`state.order`: it first runs `closeLoopForInterpolation`, which appends
+`baseOrder`'s own first frame back onto its end (unless it's already
+there), THEN expands via `withInterpolation`. So `[0,1]` (the 2-frame
+default) becomes `[0,1,0]` before expanding — turning what used to be a
+hard flip-flop into a real pendulum with both the forward AND return legs
+smoothed — and `[0,1,2,3,2,1]` (the N=4 default, already pendulum-shaped
+for its *interior*) becomes `[0,1,2,3,2,1,0]`, additionally smoothing its
+own closing cut. Either way the sequence now starts and ends on the exact
+same real frame, so the animation's actual loop-back (GIF looping, or
+however the export is played back) sits between two identical images —
+genuinely seamless, not just "less jarring." `closeLoopForInterpolation`
+is a no-op when the order already closes itself (rare, but possible with a
+hand-typed custom order ending back at its own first frame) to avoid
+computing a pointless self-to-self flow pair. `drawOrderEntry` is the
+single dispatcher every consumer of `state.order` goes through: a plain
+number still means "draw this real frame" exactly as before (so
+`state.interpolationCount === 0`, the default, is byte-for-byte identical
+to pre-interpolation behavior); an `{a,b,t}` object draws a cached
 optical-flow-warped frame if one's ready (`interpFrameCache`), else the
 **rigid fallback** (`drawInterpolatedFrameRigid`, the original technique
 from before this session's optical-flow pass): linearly interpolate the
