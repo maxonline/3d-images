@@ -254,7 +254,27 @@ ghosting on a close subject with the rigid technique, and a sharp,
 ghost-free result with this one. `getFlowForPair(a, b)` computes one
 Farneback flow field between `a` and `b`'s *cropped* content (grayscale,
 `cv.calcOpticalFlowFarneback`), cached per pair since flow doesn't depend
-on `t`; `getInterpolatedCanvas(a, b, t)` builds the actual in-between frame
+on `t`, using a **quality-tuned parameter set, not OpenCV's plain
+defaults** — `levels=5, winsize=21, iterations=7, poly_n=7, poly_sigma=1.5,
+OPTFLOW_FARNEBACK_GAUSSIAN` (vs. the tutorial-default `3, 15, 3, 5, 1.2, 0`):
+more pyramid levels and iterations for better convergence on this app's
+typically-large parallax offsets, `poly_n`/`poly_sigma` bumped together per
+OpenCV's own docs (they're paired — raising one without the other hurts
+quality), and the Gaussian-window flag for cleaner motion boundaries than
+the default box-filter averaging. **`DISOpticalFlow` (generally
+higher-quality than Farneback) was investigated and ruled out, not just
+skipped** — its JS bindings aren't exposed in prebuilt opencv.js, confirmed
+by checking both `@techstark/opencv-js` (what's actually used) and the
+official `docs.opencv.org/4.x/opencv.js` build in a real browser: `typeof
+cv.DISOpticalFlow_create` is `'undefined'` on both, even though `DISOpticalFlow`'s
+preset *constants* (`DISOpticalFlow_PRESET_FAST` etc.) leak through as
+globals — the class itself just isn't in either build's bindings
+whitelist. Getting it would need a custom Emscripten compile of OpenCV
+from source, which is out of scope here; if flow quality needs another
+jump beyond parameter tuning, the next real option is a neural model
+(RIFE via onnxruntime-web was discussed) — a much bigger lift, a second
+dependency, and slower per-frame than Farneback, not a drop-in swap.
+`getInterpolatedCanvas(a, b, t)` builds the actual in-between frame
 by warping `a` forward by `t * flow` and `b` backward by `(1-t) * flow`
 (both via `cv.remap`, an inverse/backward mapping) then blending by `t` —
 the standard "one flow field, two warps" simple-optical-flow-interpolation

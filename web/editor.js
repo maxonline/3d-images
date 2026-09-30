@@ -655,8 +655,17 @@
     cv.cvtColor(matB, grayB, cv.COLOR_RGBA2GRAY);
 
     const flow = new cv.Mat();
-    // Standard Farneback defaults (OpenCV docs' own tutorial values).
-    cv.calcOpticalFlowFarneback(grayA, grayB, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
+    // OpenCV's own "smoother, more robust" tuning from its Farneback docs
+    // (poly_n=7/poly_sigma=1.5, contrasted there with a "faster" 5/1.1
+    // pair), plus more pyramid levels and iterations for better convergence
+    // on the large parallax offsets typical here, and the Gaussian-window
+    // flag for cleaner motion boundaries than the default box-filter
+    // averaging — all a straightforward quality-over-speed tradeoff, no new
+    // dependency. (Real per-pixel motion estimation better than this needs
+    // a fundamentally different algorithm — OpenCV.js's prebuilt JS
+    // bindings don't expose DISOpticalFlow, checked both this build and
+    // the official docs.opencv.org one — or a neural model entirely.)
+    cv.calcOpticalFlowFarneback(grayA, grayB, flow, 0.5, 5, 21, 7, 7, 1.5, cv.OPTFLOW_FARNEBACK_GAUSSIAN);
 
     // flow is CV_32FC2 — interleaved [dx0,dy0, dx1,dy1, ...]. Copy it out
     // into plain typed arrays we own before deleting the Mat; .data32F is
