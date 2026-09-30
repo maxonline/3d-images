@@ -165,6 +165,66 @@ both `load()` and `reset()`, matching every other per-session alignment
 state, so a fresh upload always starts back at frame 0's center rather than
 inheriting a click position from a previous session's image geometry.
 
+**Arrow-key nudging is listened for on `window`, not the canvas — this was
+a real bug, not just a nicety.** A canvas-scoped `keydown` listener only
+fires while the canvas itself holds keyboard focus, but focus moves away
+from it constantly in normal use (clicking a slider, typing in the order
+textbox, toggling a radio), and requiring a click back onto the canvas
+before arrow keys work again was exactly the friction Space-to-move-crop
+above already solved the same way for the same reason, so arrow nudging
+gets the identical fix. Gated on `pointerOverAlignCanvas` (the same hover
+flag Space uses) OR the canvas actually being focused, so both a mouse user
+who's merely hovering (no click needed) and a keyboard-only user who
+tabbed onto the canvas keep working. **Deliberately uses a narrower guard
+than Space's `isTypingTarget`, not the same one — this distinction matters
+and was caught by a test, not assumed:** Space must leave every `<input>`
+alone (a checkbox, radio, or range slider all treat Space as
+click-it/step-it), but arrow keys only *conflict* with controls that use
+them for text-cursor or value navigation — a range slider merely still
+holding focus from an earlier click, while the mouse now hovers the
+canvas, should let the hover win, not the stale focus. `isArrowNavTarget`
+checks `<textarea>` or `<input type="text"|"number">` specifically, so
+e.g. the brightness slider being focused no longer silently blocks
+hovering-canvas arrow-nudge — verified with a Playwright test that
+explicitly focuses `#brightness-slider`, hovers the canvas, and confirms
+the offset still changes (this exact scenario failed under the broader
+`isTypingTarget` guard on the first pass and had to be narrowed).
+
+**A small crosshair on the main align canvas marks exactly where the
+magnifier loupe is currently zoomed into.** Without it there was no way to
+tell, just by looking at the align canvas, what point the zoomed-in view
+off to the side actually corresponded to. `drawMagnifier(nativeX, nativeY)`
+— the single function every magnifier-update path already funnels through
+(hover, `resetMagnifierToDefault`, a post-nudge refresh) — now also stores
+that point into `magnifierLookNative`, a tracked variable rather than a
+value recomputed independently for the crosshair; recomputing it
+separately (originally tried as `lastHoverNative || magnifierDefaultNative()`)
+would have quietly disagreed with what the loupe was actually showing in
+one real edge case — blur while still hovering, where
+`resetMagnifierToDefault` deliberately forces the default view regardless
+of hover state — so the crosshair reads the same tracked value the loupe
+itself was last drawn from, guaranteeing the two can never show different
+points. `drawAlignmentCanvas()` draws the crosshair last, via
+`drawMagnifierCrosshair()`, converting `magnifierLookNative` through the
+existing `toAlignCanvasXY` helper — drawn at the *tail* of
+`drawAlignmentCanvas()` rather than eagerly inside `drawMagnifier()`
+itself, since `drawMagnifier()` only touches the separate magnifier
+canvas, and a later `drawAlignmentCanvas()` call mid-drag would otherwise
+wipe out a crosshair painted directly onto the main canvas moments
+earlier. Because the crosshair now makes the main canvas depend on hover
+position, plain hovering (no drag) needed a new `drawAlignmentCanvas()`
+call in `pointermove` — previously a hover-only move only ever repainted
+the magnifier canvas — and `pointerleave`/`blur` each needed one too,
+since `resetMagnifierToDefault()` only ever redrew the magnifier canvas,
+never the main one. **Cyan, not black/white, after actually looking at
+it:** a plain dark-outline/white-stroke crosshair (the initial version)
+all but disappeared against a typical busy mid-tone photo — the same
+legibility problem the orange, solid-filled crop handles already solve by
+not being a thin line — confirmed by screenshotting a real test photo and
+eyeballing it, not assumed; a small `#22d3ee` ring-plus-crosshair (still
+with a dark outline pass underneath, for the rare cyan-ish background) is
+what actually reads clearly.
+
 **The nudge pad (`#nudge-pad`, four buttons below the magnifier) is a
 touch-accessible equivalent of the arrow-key shortcut, not a separate
 implementation — phones have no keyboard, so 1-native-px-per-press fine

@@ -963,7 +963,20 @@
   // precision even though the main canvas is scaled way down to fit on screen.
   // Mirrors whatever composite drawAlignmentCanvas would show for the
   // current mode/step, just zoomed.
+  // Tracks the exact point the last drawMagnifier() call rendered — the
+  // single source of truth the main canvas's crosshair reads from (see
+  // drawMagnifierCrosshair), so the crosshair can never drift out of sync
+  // with what the loupe is actually showing. Every path that changes what
+  // the magnifier displays (hover, resetMagnifierToDefault, a keyboard
+  // nudge's refresh) already funnels through drawMagnifier, so setting
+  // this here — rather than recomputing hover-vs-default separately for
+  // the crosshair — covers all of them for free, including edge cases like
+  // resetMagnifierToDefault forcing the default view on blur even while
+  // still hovering.
+  let magnifierLookNative = null;
+
   function drawMagnifier(nativeX, nativeY) {
+    magnifierLookNative = { x: nativeX, y: nativeY };
     const mc = magnifierCanvas;
     const halfW = mc.width / (2 * MAGNIFIER_ZOOM);
     const halfH = mc.height / (2 * MAGNIFIER_ZOOM);
@@ -1007,6 +1020,14 @@
   // clicked as the new resting spot instead (see endAlignCanvasDrag).
   function magnifierDefaultNative() {
     return state.magnifierDefaultOverride || { x: state.W / 2, y: state.H / 2 };
+  }
+
+  // Where the magnifier is showing RIGHT NOW, for the main canvas's
+  // crosshair — see magnifierLookNative above. Falls back to the default
+  // point only for the (currently unreachable) case of drawing the
+  // crosshair before drawMagnifier has ever run once.
+  function currentMagnifierLookNative() {
+    return magnifierLookNative || magnifierDefaultNative();
   }
 
   // Shows the default centered-on-frame-1 view (or clears, if no frames are
@@ -1129,6 +1150,54 @@
     alignCtx.setLineDash([]);
 
     if (state.mode === 'ready') drawCropOverlay();
+    drawMagnifierCrosshair();
+  }
+
+  // A small crosshair on the MAIN canvas marking exactly where the
+  // magnifier loupe is currently zoomed into — otherwise there's no way to
+  // tell, just by looking at the align canvas, what point the zoomed-in
+  // view off to the side actually corresponds to. Native-space point comes
+  // from currentMagnifierLookNative() (hover position, or the default/
+  // override when not hovering) so it's always exactly in sync with
+  // whatever drawMagnifier last rendered — drawn here, at the tail of
+  // drawAlignmentCanvas(), rather than eagerly inside drawMagnifier itself,
+  // because drawMagnifier only touches the separate magnifier canvas and a
+  // later drawAlignmentCanvas() call (e.g. mid-drag) would otherwise wipe
+  // out a crosshair drawn directly onto the main canvas moments earlier.
+  function drawMagnifierCrosshair() {
+    const { x: nx, y: ny } = currentMagnifierLookNative();
+    const { x, y } = toAlignCanvasXY(nx, ny);
+    const r = 11; // canvas-space px, crosshair arm length — fixed, doesn't scale with zoom
+    const gap = 4; // small gap at the center so the marker doesn't obscure the exact point
+    // A plain black/white crosshair (tried first) all but disappeared
+    // against a typical busy/mid-tone photo — same problem the crop
+    // handles solve by being solid orange rather than a thin outline, so
+    // this borrows that same fix: a vivid, otherwise-unused accent color
+    // (cyan) makes it readable against real content, and a dark outline
+    // pass underneath still keeps it visible on bright cyan-ish backgrounds
+    // too.
+    alignCtx.save();
+    alignCtx.lineCap = 'round';
+    [['rgba(0, 0, 0, 0.65)', 4], ['#22d3ee', 2]].forEach(([style, width]) => {
+      alignCtx.strokeStyle = style;
+      alignCtx.lineWidth = width;
+      alignCtx.beginPath();
+      alignCtx.moveTo(x - r, y);
+      alignCtx.lineTo(x - gap, y);
+      alignCtx.moveTo(x + gap, y);
+      alignCtx.lineTo(x + r, y);
+      alignCtx.moveTo(x, y - r);
+      alignCtx.lineTo(x, y - gap);
+      alignCtx.moveTo(x, y + gap);
+      alignCtx.lineTo(x, y + r);
+      alignCtx.stroke();
+    });
+    alignCtx.beginPath();
+    alignCtx.arc(x, y, gap, 0, Math.PI * 2);
+    alignCtx.strokeStyle = '#22d3ee';
+    alignCtx.lineWidth = 1.5;
+    alignCtx.stroke();
+    alignCtx.restore();
   }
 
   // Single-level undo, not a full history stack — deliberately scoped to
@@ -1253,6 +1322,12 @@
     maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
 
     if (!state.drag) {
+      // A plain hover (no drag) never touched drawAlignmentCanvas before —
+      // only maybeDrawMagnifier above, which just repaints the separate
+      // magnifier canvas. Now that the main canvas also shows a crosshair
+      // at the magnifier's look point, it needs to keep up with the mouse
+      // here too, not just during drags (which already redraw it below).
+      drawAlignmentCanvas();
       updateAlignHoverCursor(e.clientX, e.clientY);
       return;
     }
@@ -1297,10 +1372,17 @@
     if (state.drag) return; // pointer capture keeps a drag going even once the cursor visually leaves
     lastHoverNative = null;
     resetMagnifierToDefault();
+    // The crosshair on the main canvas needs its own repaint here too —
+    // resetMagnifierToDefault() only touches the separate magnifier canvas,
+    // and this is the one place currentMagnifierLookNative()'s result
+    // actually changes (hover -> default) without some other drag/nudge
+    // handler already redrawing the main canvas as a side effect.
+    if (state.frames.length > 0) drawAlignmentCanvas();
   });
 
   alignCanvas.addEventListener('blur', () => {
     resetMagnifierToDefault();
+    if (state.frames.length > 0) drawAlignmentCanvas();
   });
 
   // Below this many CSS px of total pointer movement, a "drag" is treated
@@ -1342,10 +1424,35 @@
 
   // Arrow keys nudge alignment by exactly 1 native image pixel per press —
   // finer than mouse dragging can reach once the canvas is scaled down.
-  alignCanvas.addEventListener('keydown', (e) => {
+  // Listened for on window, not the canvas — this was a real bug, not just
+  // a nicety: a canvas-scoped listener only fires while the canvas itself
+  // has keyboard focus, but focus moves away from it constantly (clicking
+  // a slider, typing in the order textbox, toggling a radio), and requiring
+  // a user to click back onto the canvas before arrow keys work again is
+  // exactly the kind of friction Space-to-move-crop below already solved
+  // the same way for the same reason. Gated on `pointerOverAlignCanvas`
+  // (hovering, same flag the Space listener uses) OR the canvas actually
+  // being focused (so keyboard-only/no-mouse use — e.g. tabbing to the
+  // canvas — still works). Deliberately checks `isArrowNavTarget`, NOT the
+  // broader `isTypingTarget` the Space listener below uses: a range slider
+  // or radio button is an <input> too, and Space should indeed leave those
+  // alone (Space activates/steps them), but arrow keys only have a
+  // *conflicting* native meaning on controls that use them for text-cursor
+  // or value navigation (text/number inputs, textareas) — if a slider
+  // merely still has focus from an earlier click while the mouse now
+  // hovers the canvas, hovering wins and arrows nudge, matching what the
+  // user is actually pointing at rather than stale focus elsewhere.
+  function isArrowNavTarget(el) {
+    if (!el) return false;
+    if (el.tagName === 'TEXTAREA') return true;
+    return el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number');
+  }
+  window.addEventListener('keydown', (e) => {
     const steps = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     const step = steps[e.key];
     if (!step) return;
+    if (isArrowNavTarget(document.activeElement)) return;
+    if (!pointerOverAlignCanvas && document.activeElement !== alignCanvas) return;
     e.preventDefault();
     nudgeAlign(step[0], step[1]);
   });
