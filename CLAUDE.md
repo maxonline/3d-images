@@ -66,11 +66,33 @@ semi-transparent double-exposure of both frames (drag anywhere to nudge the
 right frame's offset — arrow keys nudge by exactly 1 native px) *and* the
 crop rectangle's 4 corner handles, layered on top. This is deliberate: the
 crop starts out covering the entire overlap region, so if dragging the crop
-*body* were also supported, it would swallow almost all click area meant for
-the (primary) alignment drag. Only the 4 corner handles are draggable for
-resizing the crop; there's a 200px native-pixel margin baked into the
-canvas around both images so alignment drags don't push either frame off
-the visible canvas.
+*body* were also supported by a plain click-drag, it would swallow almost
+all click area meant for the (primary) alignment drag. Only the 4 corner
+handles are draggable for resizing the crop; there's a 200px native-pixel
+margin baked into the canvas around both images so alignment drags don't
+push either frame off the visible canvas.
+
+**Holding Space resolves that tradeoff instead of working around it — a
+plain click-drag still means "align," but Space+drag unambiguously means
+"move the crop," anywhere on the canvas, corner handle or not.** Checked
+first in `pointerdown` (and mirrored in `updateAlignHoverCursor` for the
+`'move'` vs `'grab'` cursor), so it overrides hit-testing entirely rather
+than only applying when the crop body happens to be under the pointer.
+`state.drag.kind = 'crop-move'` translates `state.crop.x/y` by the drag
+delta (`w`/`h` untouched) and runs it through the existing
+`clampCropToOverlap()` — the same function already used to keep a resized
+crop inside the overlap, since a same-size reposition needs exactly the
+same clamping, just never triggers the width/height-shrinking branch. The
+Space listener is on `window`, not the canvas, gated on a
+`pointerOverAlignCanvas` flag (set by the canvas's own `pointermove`/
+`pointerleave`) rather than needing the canvas to already have keyboard
+focus — and on the active element not being a text input, so it doesn't
+swallow a literal space typed into e.g. the animation-order textbox, and
+doesn't hijack normal page-scroll-by-space when the user's spacebar-
+scrolling with the mouse elsewhere. A drag's kind is fixed at `pointerdown`
+time; releasing Space mid-drag doesn't retroactively change what an
+already-started `crop-move` drag is doing, matching how e.g. `crop-resize`
+already commits to one handle for the drag's whole duration.
 
 **The crop rectangle is always clamped inside the overlap.** `state.crop`
 must stay within `currentOverlapRect()` — enforced by

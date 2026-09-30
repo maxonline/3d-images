@@ -985,6 +985,14 @@
   const CURSOR_BY_HANDLE = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize' };
 
   function updateAlignHoverCursor(clientX, clientY) {
+    // Space overrides hit-testing entirely (matches pointerdown) — 'move'
+    // rather than 'grab' so it's visually distinct from a normal align
+    // drag, which uses 'grab' for the exact same "nothing under the
+    // pointer" case.
+    if (spacePressed && state.mode === 'ready') {
+      alignCanvas.style.cursor = 'move';
+      return;
+    }
     const { x: cx, y: cy } = clientToCanvasXY(alignCanvas, clientX, clientY);
     const hit = hitTestCrop(cx, cy);
     if (hit) {
@@ -1060,6 +1068,20 @@
     alignCanvas.setPointerCapture(e.pointerId);
     alignCanvas.focus();
 
+    // Space overrides everything else — moving the whole crop rect at its
+    // current size, regardless of whether the pointer happens to be over a
+    // resize handle or not.
+    if (spacePressed && state.mode === 'ready') {
+      alignCanvas.style.cursor = 'grabbing';
+      state.drag = {
+        kind: 'crop-move',
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startCrop: { ...state.crop },
+      };
+      return;
+    }
+
     if (hit) {
       alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
       state.drag = {
@@ -1085,8 +1107,11 @@
   });
 
   let lastHoverNative = null; // last mouse position in native coords, for re-drawing the magnifier after a keyboard nudge
+  let spacePressed = false; // holding Space over the canvas switches a drag to moving the crop rect, instead of aligning or resizing it
+  let pointerOverAlignCanvas = false; // gates the Space listener below from hijacking normal page scroll when the pointer's elsewhere
 
   alignCanvas.addEventListener('pointermove', (e) => {
+    pointerOverAlignCanvas = true;
     const { x: cx, y: cy } = clientToCanvasXY(alignCanvas, e.clientX, e.clientY);
     lastHoverNative = fromAlignCanvasXY(cx, cy);
     maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
@@ -1108,9 +1133,22 @@
       drawAlignmentCanvas();
       updateOffsetLabel();
       if (state.mode === 'ready') updateOutputSizeLabel();
+    } else if (state.drag.kind === 'crop-move') {
+      // alignScale is intentionally NOT recomputed mid-drag, matching
+      // crop-resize below, so the canvas-to-native ratio stays constant for
+      // the duration of the drag.
+      const { dx, dy } = nativeDelta(alignCanvas, alignScale, state.drag.startClientX, state.drag.startClientY, e.clientX, e.clientY);
+      state.crop = { ...state.drag.startCrop, x: state.drag.startCrop.x + dx, y: state.drag.startCrop.y + dy };
+      // Same size, just repositioned — clampCropToOverlap only ever SHRINKS
+      // w/h if they exceed the overlap, so it won't touch size here, only
+      // keep x/y inside bounds (or re-fit to the locked ratio's rect, which
+      // preserves size the same way).
+      clampCropToOverlap();
+      drawAlignmentCanvas();
+      updateOutputSizeLabel();
     } else {
-      // alignScale is intentionally NOT recomputed mid-drag so the
-      // canvas-to-native ratio stays constant for the duration of the drag.
+      // crop-resize. alignScale is intentionally NOT recomputed mid-drag so
+      // the canvas-to-native ratio stays constant for the duration of the drag.
       const { dx, dy } = nativeDelta(alignCanvas, alignScale, state.drag.startClientX, state.drag.startClientY, e.clientX, e.clientY);
       state.crop = clampResizeCrop(state.drag.startCrop, state.drag.handle, dx, dy, state.cropRatio);
       drawAlignmentCanvas();
@@ -1119,6 +1157,7 @@
   });
 
   alignCanvas.addEventListener('pointerleave', (e) => {
+    pointerOverAlignCanvas = false;
     if (state.drag) return; // pointer capture keeps a drag going even once the cursor visually leaves
     lastHoverNative = null;
     hideMagnifier();
@@ -1131,12 +1170,12 @@
   function endAlignCanvasDrag(e) {
     if (!state.drag) return;
     alignCanvas.releasePointerCapture(e.pointerId);
-    const wasCrop = state.drag.kind === 'crop-resize';
+    const wasCrop = state.drag.kind === 'crop-resize' || state.drag.kind === 'crop-move';
     state.drag = null;
     if (wasCrop) recomputePreviewScale();
-    // Either kind of drag changes what interpolated frames should look
-    // like — align changes a frame's dx/dy, crop-resize changes the region
-    // flow gets computed from — so anything cached is now stale.
+    // Every kind of drag changes what interpolated frames should look
+    // like — align changes a frame's dx/dy, crop-resize/crop-move changes
+    // the region flow gets computed from — so anything cached is now stale.
     clearInterpolationCaches();
     scheduleInterpolationPrep();
     updateAlignHoverCursor(e.clientX, e.clientY);
@@ -1152,6 +1191,42 @@
     if (!step) return;
     e.preventDefault();
     nudgeAlign(step[0], step[1]);
+  });
+
+  // Hold Space to move the crop rect instead of aligning/resizing — the one
+  // interaction the canvas couldn't otherwise offer, per the deliberate
+  // design tradeoff in this file's docs: dragging the crop BODY isn't a
+  // plain click-drag because the crop starts out covering nearly the whole
+  // canvas, which would swallow almost all click area meant for the
+  // (primary) alignment drag. Listened for on window, not the canvas, so it
+  // works the instant the pointer's over the canvas — it doesn't require
+  // the canvas to already have keyboard focus first. Gated on
+  // pointerOverAlignCanvas so it never hijacks normal page-scroll-by-space
+  // when the user's spacebar-scrolling with the mouse elsewhere, and on not
+  // being focused in a text input so it never swallows a literal space
+  // while typing (e.g. into the animation-order textbox).
+  function isTypingTarget(el) {
+    return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+  }
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space' || !pointerOverAlignCanvas || isTypingTarget(document.activeElement)) return;
+    e.preventDefault(); // block page scroll
+    if (!spacePressed) {
+      spacePressed = true;
+      if (!state.drag) alignCanvas.style.cursor = 'move';
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code !== 'Space') return;
+    spacePressed = false;
+    // Mid-drag, leave the cursor/behavior alone until pointerup — a drag's
+    // kind is fixed at pointerdown time (see the handler above), so
+    // releasing Space partway through an active crop-move shouldn't
+    // suddenly change what it's doing. Not worth tracking the last client
+    // mouse position just to restore the exact hit-tested cursor here —
+    // 'grab' is a fine approximation; the very next pointermove corrects it
+    // precisely regardless.
+    if (!state.drag) alignCanvas.style.cursor = 'grab';
   });
 
   // --- Frame selection for 3+ frames ---
