@@ -144,6 +144,27 @@ clearing the canvas. `resetMagnifierToDefault` guards the one case where
 clearing is still actually correct — no frames loaded at all yet (e.g.
 right after `reset()`), when there's nothing to draw a zoomed view *of*.
 
+**A plain click on the align canvas (pointerdown+pointerup with barely any
+movement between them) sets the magnifier's resting position to the clicked
+point, instead of performing a no-op zero-distance align/crop-move.**
+`endAlignCanvasDrag` measures `Math.hypot(...)` between the pointerdown and
+pointerup client coordinates and treats anything under
+`CLICK_MOVEMENT_THRESHOLD = 4` (CSS px) as a click rather than a drag —
+except on a corner handle (`kind === 'crop-resize'`), where even a
+no-movement press is a deliberate grab of that handle, not a "point at
+something" click, so it's excluded. A genuine click writes the clicked
+point (converted through the existing `clientToCanvasXY`/`fromAlignCanvasXY`
+helpers, no new coordinate math) into `state.magnifierDefaultOverride`;
+`magnifierDefaultNative()` returns that override when set, falling back to
+frame 0's center (`{x: state.W/2, y: state.H/2}`) only while it's `null`.
+Because nothing actually changed on a click, the undo snapshot
+`captureUndoSnapshot()` already took at pointerdown is discarded
+(`undoSnapshot = null; undoBtn.disabled = true;`) rather than left around as
+a no-op undo entry. `state.magnifierDefaultOverride` is reset to `null` in
+both `load()` and `reset()`, matching every other per-session alignment
+state, so a fresh upload always starts back at frame 0's center rather than
+inheriting a click position from a previous session's image geometry.
+
 **The nudge pad (`#nudge-pad`, four buttons below the magnifier) is a
 touch-accessible equivalent of the arrow-key shortcut, not a separate
 implementation — phones have no keyboard, so 1-native-px-per-press fine
@@ -151,7 +172,13 @@ alignment would otherwise be unreachable on mobile.** Each button's click
 handler just calls `nudgeAlign(ddx, ddy)` directly, the exact same
 function the keyboard listener already called — same 1px step, same
 `clampAlign`, same lock-guard, same undo-snapshot capture, automatically,
-with no new logic of its own.
+with no new logic of its own. `nudgeAlign` already no-ops while
+`state.alignmentLocked` is true (locking means a plain drag moves the crop,
+not alignment — see below), but the buttons stayed clickable-looking despite
+doing nothing; `updateNudgeButtonsAvailability()` now sets `.disabled` on
+all four to match, called from the lock checkbox's `change` handler and from
+`load`/`reset` (so a fresh upload always starts with them enabled, same as
+the checkbox itself starting unchecked).
 
 **The crop rectangle is always clamped inside the overlap.** `state.crop`
 must stay within `currentOverlapRect()` — enforced by
@@ -667,24 +694,32 @@ region in native pixels; the "Output scale" slider only changes the
 *destination* size frames are drawn into at export time (`computeOutputSize`).
 Dragging/resizing the crop never touches this.
 
-**`state.outputScalePercent` is the sole source of truth for output size —
-the "Output width" textbox is just a second way to set the same value, not
-a separate mode.** Typing a width computes the equivalent percent
-(`scalePercentForWidth(width, cropWidth)`) and runs it through the exact
-same `applyScale` the % slider uses, so both stay in sync regardless of
-which one was actually touched, and `updateOutputSizeLabel` (called after
-any change to either scale or crop) resyncs the width textbox to
-`computeOutputSize().w` every time — including after a crop resize, so it
-never goes stale. Consequence worth knowing: because everything still
-funnels through one percent value with 1% granularity, an exact requested
-width like `1080` can land a few px off (e.g. `1075`) after rounding to the
-nearest whole percent — accepted, not worth a second independent
-width-driven code path just to close a few-pixel gap. `enterReadyMode`
-applies this once as the *default*, targeting `DEFAULT_OUTPUT_WIDTH = 1080`
-(clamped to 100% — never upscales past the crop's native resolution for a
-narrower crop) — same one-time-default treatment as brightness/contrast/hue
-already get, not a continuously-enforced constraint, so dragging the %
-slider or crop afterward behaves exactly as it already did.
+**`state.outputScalePercent` is the sole source of truth for output size,
+and it's kept at full float precision, unclamped below 10% — the % slider/
+box are a deliberately coarse, rounded-to-whole-percent, [10,100]-clamped
+*display* of it, never written back into it.** This was a real bug, not a
+style choice: an earlier version (`scalePercentForWidth`) computed the width
+textbox's percent with `Math.round()` and then clamped it into the slider's
+own `[10,100]` range before ever reaching `state`, so a requested width that
+didn't land on an exact whole percent — or was under ~10% of the crop width
+— silently snapped to whatever the nearest representable percent produced
+instead of the width actually typed. `setOutputWidthPrecise(desiredWidth)`
+now writes `(desiredWidth / state.crop.w) * 100` straight into
+`state.outputScalePercent` (only clamped to `<=100`, since upscaling past
+the crop's native resolution isn't supported — `computeOutputSize`'s own
+`Math.max(1, ...)` is what prevents a literal 0px result), so any pixel
+width is exact, including ones under 1% of the crop or between two whole
+percents. `updateOutputSizeLabel` still resyncs the width textbox to
+`computeOutputSize().w` after any change to either scale or crop, and
+separately resyncs the %-slider/box to `state.outputScalePercent` rounded
+and clamped into `[10,100]` for display only — neither resync writes back
+into `state.outputScalePercent`, so typing a precise width followed by
+touching the % slider is the only thing that ever coarsens it (that's
+`applyScale`'s job, and is the expected way to opt back into whole-percent
+granularity). `enterReadyMode` applies this once as the *default*, calling
+`setOutputWidthPrecise(DEFAULT_OUTPUT_WIDTH)` with `DEFAULT_OUTPUT_WIDTH =
+1080` — same one-time-default treatment as brightness/contrast/hue already
+get, not a continuously-enforced constraint.
 
 **No build step, on purpose.** Keep it a plain static site — if a dependency
 is needed, vendor its files into `web/lib/` (as done for gif.js and

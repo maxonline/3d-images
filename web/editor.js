@@ -168,6 +168,7 @@
     crop: { x: 0, y: 0, w: 0, h: 0 },
     cropRatio: null, // locked width/height ratio, or null for free-form
     alignmentLocked: false, // when true, a plain drag moves the crop instead of aligning — no Space needed
+    magnifierDefaultOverride: null, // native {x,y} set by clicking (not dragging) the canvas; null = frame 0's center
     adjust: { brightness: 0, contrast: 0, hue: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
@@ -401,28 +402,47 @@
     // whenever something ELSE changed it — the % slider, a crop resize —
     // but NOT while the user is actively typing into it: this used to
     // unconditionally overwrite it here too, which (since a typed width
-    // only maps to a whole-percent scale, then gets rounded back to
-    // pixels) rewrote whatever had just been typed on literally every
-    // keystroke — e.g. typing "1" immediately became "349" (1px rounds
-    // down to 0%, clamped up to the 10% minimum, 10% of a ~3488px-wide
-    // crop), making it impossible to type any further digits at all. The
-    // box now reformats to the precise resulting width only once editing
-    // finishes (on blur, see below), not on every keystroke.
+    // used to get rounded to a whole percent and back) rewrote whatever
+    // had just been typed on literally every keystroke. The box now
+    // reformats to the precise resulting width only once editing finishes
+    // (on blur, see below), not on every keystroke.
     if (!editingScaleWidthInput) scaleWidthInput.value = w;
+
+    // The % slider/number box are a deliberately coarse, whole-percent,
+    // [10,100]-clamped VIEW of state.outputScalePercent — not the source
+    // of truth. state.outputScalePercent itself stays at full float
+    // precision and unclamped-below-10 (set via setOutputWidthPrecise
+    // below), so a width the % control can't exactly represent (under 10%,
+    // or between two whole percents) still renders correctly; only this
+    // display resyncs to the nearest thing the % control CAN show, it
+    // never writes back into state.outputScalePercent and so never
+    // destroys that precision.
+    const sliderMin = Number(scaleSlider.min);
+    const sliderMax = Number(scaleSlider.max);
+    const roundedPercent = Math.max(sliderMin, Math.min(sliderMax, Math.round(state.outputScalePercent)));
+    scaleSlider.value = roundedPercent;
+    scaleValue.value = roundedPercent;
   }
 
-  // scalePercentForWidth/DEFAULT_OUTPUT_WIDTH: converts a desired output
-  // WIDTH in px into the equivalent outputScalePercent, the single source
-  // of truth computeOutputSize() actually reads — the width textbox is
-  // just another way to set that same percentage, not a separate mode, so
-  // resizing the crop afterward keeps behaving exactly like it already did
-  // (output size scales proportionally with the crop, same as dragging the
-  // % slider always has). Clamped to the slider's own [10,100] range —
-  // can't request upscaling past the crop's native resolution.
+  // setOutputWidthPrecise/DEFAULT_OUTPUT_WIDTH: sets a desired output WIDTH
+  // in px by computing the exact (not rounded, not floored-at-10%)
+  // equivalent percentage directly into state.outputScalePercent — full
+  // pixel precision, including widths under 1% of the crop or that don't
+  // land on a whole percent at all. This was a real bug, not a style
+  // choice: the previous version (scalePercentForWidth) rounded to a whole
+  // percent AND clamped to the slider's own [10,100] range before ever
+  // reaching state, so a requested width that didn't exactly match some
+  // whole percent of the crop — or was under ~10% of it — silently snapped
+  // to whatever the nearest representable percent produced instead of the
+  // width actually typed. Only clamped to <=100% here (can't request
+  // upscaling past the crop's native resolution); computeOutputSize's own
+  // Math.max(1, ...) is what prevents a literal 0px result.
   const DEFAULT_OUTPUT_WIDTH = 1080;
 
-  function scalePercentForWidth(width, cropWidth) {
-    return Math.max(10, Math.min(100, Math.round((width / cropWidth) * 100)));
+  function setOutputWidthPrecise(desiredWidth) {
+    if (state.crop.w <= 0) return;
+    state.outputScalePercent = Math.max(0, Math.min(100, (desiredWidth / state.crop.w) * 100));
+    updateOutputSizeLabel();
   }
 
   function sourceRectFor(frameIndex, crop, offsetOverride) {
@@ -980,11 +1000,13 @@
     magnifierCtx.stroke();
   }
 
-  // Center of frame 0 (the anchor) in native coordinates — the magnifier's
-  // resting position whenever the pointer isn't actively over the canvas,
-  // so there's always something useful showing rather than a blank box.
+  // The magnifier's resting position whenever the pointer isn't actively
+  // over the canvas — frame 0's center by default, so there's always
+  // something useful showing rather than a blank box, but overridable: a
+  // click (not a drag) anywhere on the canvas sets exactly where the user
+  // clicked as the new resting spot instead (see endAlignCanvasDrag).
   function magnifierDefaultNative() {
-    return { x: state.W / 2, y: state.H / 2 };
+    return state.magnifierDefaultOverride || { x: state.W / 2, y: state.H / 2 };
   }
 
   // Shows the default centered-on-frame-1 view (or clears, if no frames are
@@ -1281,10 +1303,31 @@
     resetMagnifierToDefault();
   });
 
+  // Below this many CSS px of total pointer movement, a "drag" is treated
+  // as a plain click instead — see endAlignCanvasDrag.
+  const CLICK_MOVEMENT_THRESHOLD = 4;
+
   function endAlignCanvasDrag(e) {
     if (!state.drag) return;
     alignCanvas.releasePointerCapture(e.pointerId);
-    const wasCrop = state.drag.kind === 'crop-resize' || state.drag.kind === 'crop-move';
+    const { kind, startClientX, startClientY } = state.drag;
+    const wasCrop = kind === 'crop-resize' || kind === 'crop-move';
+    const moved = Math.hypot(e.clientX - startClientX, e.clientY - startClientY);
+
+    // A genuine click (not a drag) on the canvas body — not a corner
+    // handle, which is a deliberate grab, not a "point at something" click
+    // — sets that point as the magnifier's new resting position, instead
+    // of leaving behind a no-op zero-distance align/crop-move. Nothing
+    // actually changed, so there's nothing worth undoing either — drop the
+    // snapshot captureUndoSnapshot() already took at pointerdown, rather
+    // than leaving Undo enabled for a click that did nothing.
+    if (moved < CLICK_MOVEMENT_THRESHOLD && kind !== 'crop-resize') {
+      const { x: cx, y: cy } = clientToCanvasXY(alignCanvas, e.clientX, e.clientY);
+      state.magnifierDefaultOverride = fromAlignCanvasXY(cx, cy);
+      undoSnapshot = null;
+      undoBtn.disabled = true;
+    }
+
     state.drag = null;
     if (wasCrop) recomputePreviewScale();
     // Every kind of drag changes what interpolated frames should look
@@ -1367,8 +1410,8 @@
 
   function updateAlignHint() {
     alignHintEl.textContent = frameCount() > 2
-      ? 'Click a frame below to select it, then drag it (or use arrow keys, 1px per press) onto the ghosted average of every frame already aligned. Every frame needs a click before you can crop. Drag an orange corner handle to resize the crop once it appears. Hover for a zoomed-in view.'
-      : "Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.";
+      ? 'Click a frame below to select it, then drag it (or use arrow keys, 1px per press) onto the ghosted average of every frame already aligned. Hold Space while dragging to move the crop instead. Every frame needs a click before you can crop. Drag an orange corner handle to resize the crop once it appears. Hover for a zoomed-in view.'
+      : "Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Hold Space while dragging to move the crop instead of aligning. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.";
   }
 
   function renderThumbnailStrip() {
@@ -1452,7 +1495,7 @@
     resetCropToOverlap();
     recomputeAlignScale();
     recomputePreviewScale();
-    applyScale(scalePercentForWidth(DEFAULT_OUTPUT_WIDTH, state.crop.w));
+    setOutputWidthPrecise(DEFAULT_OUTPUT_WIDTH);
 
     resetOrderToDefault();
 
@@ -1589,14 +1632,15 @@
     const desiredWidth = Number(scaleWidthInput.value);
     if (!Number.isFinite(desiredWidth) || desiredWidth <= 0) return;
     editingScaleWidthInput = true;
-    applyScale(scalePercentForWidth(desiredWidth, state.crop.w));
+    setOutputWidthPrecise(desiredWidth);
     editingScaleWidthInput = false;
   });
-  // Once editing finishes: snap to the actual resulting width, whether
-  // that's recovering from empty/invalid input (same behavior
-  // linkSliderWithNumber's pairs already have) or just reformatting a
-  // valid typed value to what it actually rounds to (e.g. "1080" ->
-  // "1075") now that typing no longer gets fought keystroke-by-keystroke.
+  // Once editing finishes: snap to the actual resulting width. Typing an
+  // exact pixel value round-trips exactly now (setOutputWidthPrecise keeps
+  // full float precision, no whole-percent rounding in between) — this
+  // only visibly reformats the box for the same reason it always could:
+  // recovering from empty/invalid input, same behavior
+  // linkSliderWithNumber's pairs already have.
   scaleWidthInput.addEventListener('blur', () => {
     scaleWidthInput.value = computeOutputSize().w;
   });
@@ -1621,6 +1665,17 @@
     });
   });
 
+  // The nudge-pad arrow buttons only ever move alignment (nudgeAlign already
+  // no-ops while locked) — disable them outright while locked so that's
+  // visible at a glance instead of a silent no-op on click.
+  function updateNudgeButtonsAvailability() {
+    const disabled = state.alignmentLocked;
+    nudgeUpBtn.disabled = disabled;
+    nudgeDownBtn.disabled = disabled;
+    nudgeLeftBtn.disabled = disabled;
+    nudgeRightBtn.disabled = disabled;
+  }
+
   lockAlignmentCheckbox.addEventListener('change', () => {
     state.alignmentLocked = lockAlignmentCheckbox.checked;
     // The pointer is over the checkbox, not the canvas, right now, so
@@ -1631,6 +1686,7 @@
     } else {
       alignCanvas.style.cursor = 'grab';
     }
+    updateNudgeButtonsAvailability();
   });
 
   // Anaglyph tint is inherently a 2-view concept — disable it once there are
@@ -2167,8 +2223,10 @@
     state.cropRatio = null;
     lockAlignmentCheckbox.checked = false;
     state.alignmentLocked = false;
+    state.magnifierDefaultOverride = null;
     undoSnapshot = null;
     undoBtn.disabled = true;
+    updateNudgeButtonsAvailability();
 
     updateColorModeAvailability();
     updateAlignHint();
@@ -2209,6 +2267,8 @@
     state.crop = { x: 0, y: 0, w: 0, h: 0 };
     state.alignmentLocked = false;
     lockAlignmentCheckbox.checked = false;
+    updateNudgeButtonsAvailability();
+    state.magnifierDefaultOverride = null;
     undoSnapshot = null;
     undoBtn.disabled = true;
     thumbStripEl.innerHTML = '';

@@ -457,6 +457,12 @@ h1 {
   background: var(--border);
 }
 
+.nudge-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  border-color: var(--border);
+}
+
 .nudge-up { grid-column: 2; grid-row: 1; }
 .nudge-left { grid-column: 1; grid-row: 2; }
 .nudge-right { grid-column: 3; grid-row: 2; }
