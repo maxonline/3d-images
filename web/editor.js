@@ -18,6 +18,7 @@
   const cropExportPanelEl = document.getElementById('crop-export-panel');
 
   const orderSectionEl = document.getElementById('order-section');
+  const orderSequenceStripEl = document.getElementById('order-sequence-strip');
   const orderInput = document.getElementById('order-input');
   const orderErrorEl = document.getElementById('order-error');
 
@@ -791,7 +792,10 @@
       window.AppShared.setStatus('Preparing optical-flow interpolation…');
       prepareInterpolatedFrames(state.order)
         .then(() => {
-          if (token === interpPrepToken) window.AppShared.setStatus('Ready.');
+          if (token === interpPrepToken) {
+            window.AppShared.setStatus('Ready.');
+            renderOrderSequenceStrip(); // upgrade placeholders to the real optical-flow thumbnails
+          }
         })
         .catch((err) => {
           console.error(err);
@@ -1202,7 +1206,11 @@
     frameThumbSectionEl.hidden = !multi;
     cropRatioSectionEl.hidden = !ready;
     cropExportPanelEl.hidden = !ready;
-    orderSectionEl.hidden = !(ready && multi);
+    // Shown for any N>2 wigglegram (as before), but now also for a 2-frame
+    // one the moment interpolation is turned on — that's the only case
+    // where a 2-frame animation order becomes more than the fixed [1,2]
+    // flip, so there's something worth showing/editing.
+    orderSectionEl.hidden = !(ready && (multi || state.interpolationCount > 0));
   }
 
   // Redraws everything after the active frame changes, WITHOUT touching
@@ -1230,6 +1238,7 @@
     state.baseOrder = defaultOrder(frameCount());
     orderInput.value = formatOrder(state.baseOrder);
     state.order = orderForRendering(state.baseOrder, state.interpolationCount);
+    renderOrderSequenceStrip();
     orderErrorEl.hidden = true;
     orderValid = true;
 
@@ -1337,6 +1346,8 @@
     state.interpolationCount = v;
     state.order = orderForRendering(state.baseOrder, v);
     updateColorModeAvailability();
+    if (state.mode === 'ready') applyModeVisibility(); // order-section visibility depends on interpolationCount for 2-frame sets
+    renderOrderSequenceStrip();
     scheduleInterpolationPrep();
   });
   const applyBrightness = linkSliderWithNumber(brightnessSlider, brightnessValue, (v) => {
@@ -1459,6 +1470,78 @@
     return expanded;
   }
 
+  // Fractional position label for an interpolated entry — e.g. a=0 (frame
+  // "1"), b=1 (frame "2"), t=0.5 -> "1.5". Lets the sequence strip below
+  // show where each synthesized frame sits between its two real neighbors,
+  // consistent with the real frames' plain integer labels either side of it.
+  function formatInterpLabel(entry) {
+    const labelA = entry.a + 1;
+    const labelB = entry.b + 1;
+    return (labelA + entry.t * (labelB - labelA)).toFixed(1);
+  }
+
+  // Visual strip showing every entry currently in state.order — real
+  // frames and (once computed) their optical-flow-interpolated in-betweens
+  // — so editing the order textbox or the interpolation count has an
+  // immediate, concrete preview of what actually gets exported, not just
+  // the raw typed frame numbers. Re-rendered on every state.order
+  // reassignment; interpolated entries not yet computed just show an empty
+  // placeholder box (still labeled and badged) until
+  // scheduleInterpolationPrep's background pass finishes and calls this
+  // again. Each interpolated thumbnail is its own fresh <img> (via
+  // canvas.toDataURL on a copy, not the cached canvas element itself) so
+  // the same {a,b,t} cache entry can safely appear more than once in the
+  // strip without fighting over which container a single DOM node lives in.
+  function renderOrderSequenceStrip() {
+    orderSequenceStripEl.innerHTML = '';
+    state.order.forEach((entry) => {
+      // Defensive: state.order can transiently reference a just-replaced
+      // frame set (e.g. applyInterpolation(0)'s reset-on-load runs before
+      // load() has rebuilt state.order for the new frames) — skip rather
+      // than throw on a stale index.
+      const frameIndices = typeof entry === 'number' ? [entry] : [entry.a, entry.b];
+      if (frameIndices.some((i) => !state.frames[i])) return;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'seq-thumb';
+
+      const mediaWrap = document.createElement('div');
+      mediaWrap.className = 'seq-thumb-media-wrap';
+      wrap.appendChild(mediaWrap);
+
+      let label;
+      if (typeof entry === 'number') {
+        const img = document.createElement('img');
+        img.className = 'seq-thumb-media';
+        img.src = state.frames[entry].img.src;
+        img.alt = `Frame ${entry + 1}`;
+        mediaWrap.appendChild(img);
+        label = String(entry + 1);
+      } else {
+        const cached = interpFrameCache.get(`${entry.a}-${entry.b}-${entry.t}`);
+        if (cached) {
+          const img = document.createElement('img');
+          img.className = 'seq-thumb-media';
+          img.src = cached.toDataURL('image/jpeg', 0.7);
+          img.alt = 'Interpolated frame';
+          mediaWrap.appendChild(img);
+        }
+        const badge = document.createElement('span');
+        badge.className = 'seq-thumb-badge';
+        badge.textContent = 'Interpolated';
+        mediaWrap.appendChild(badge);
+        label = formatInterpLabel(entry);
+      }
+
+      const labelEl = document.createElement('span');
+      labelEl.className = 'seq-thumb-label';
+      labelEl.textContent = label;
+      wrap.appendChild(labelEl);
+
+      orderSequenceStripEl.appendChild(wrap);
+    });
+  }
+
   function parseOrder(text, n) {
     const trimmed = text.trim();
     if (trimmed === '') return { error: 'Enter at least 2 frame numbers, comma-separated (e.g. "1,2,3,2").' };
@@ -1485,6 +1568,7 @@
     } else {
       state.baseOrder = result.order;
       state.order = orderForRendering(state.baseOrder, state.interpolationCount);
+      renderOrderSequenceStrip();
       scheduleInterpolationPrep();
     }
     updateGenerateButtonsDisabled();
@@ -1743,6 +1827,7 @@
         window.AppShared.setStatus('Preparing optical-flow interpolation…');
         try {
           await prepareInterpolatedFrames(state.order);
+          renderOrderSequenceStrip();
         } catch (err) {
           console.error(err);
         }
@@ -1804,6 +1889,8 @@
   function load(images, baseName) {
     stopPreviewLoop();
     clearInterpolationCaches();
+    state.baseOrder = [];
+    state.order = [];
 
     state.frames = images.map((img) => ({ img, dx: 0, dy: 0 }));
     state.W = images[0].naturalWidth;
@@ -1865,6 +1952,7 @@
     state.crop = { x: 0, y: 0, w: 0, h: 0 };
     thumbStripEl.innerHTML = '';
     frameThumbSectionEl.hidden = true;
+    orderSequenceStripEl.innerHTML = '';
     orderInput.value = '';
     orderErrorEl.hidden = true;
     orderValid = true;

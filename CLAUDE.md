@@ -177,18 +177,50 @@ offset, confirm it, then select frame 2 — `currentOverlapRect()` must still
 reflect frame 3's offset afterward. If you touch either of these functions,
 re-run that scenario, not just the "click 1, 2, 3 in order" happy path.
 
-**Animation order (`state.order`/`state.baseOrder`, 3+ frames only for the
-textbox — see interpolation below for 2-frame animation control).** A
+**Animation order (`state.order`/`state.baseOrder`, `#order-section`).** A
 validated, comma-separated 1-indexed text field (`#order-input`,
 `parseOrder`/`formatOrder`) drives `state.baseOrder`, the *real* frame
 sequence; `defaultOrder(n)` produces a pendulum bounce (`[0..n-1, n-2..1]`,
 which is `[0,1]` — i.e. today's old plain alternation — when `n===2`, and
 `[0,1,2,3,2,1]` → displayed as `"1,2,3,4,3,2"` when `n===4`). `generateGif`/
 `generateWebp`/`generateMp4`/the live preview loop all loop over
-`state.order` (== `withInterpolation(state.baseOrder, state.interpolationCount)`,
+`state.order` (== `orderForRendering(state.baseOrder, state.interpolationCount)`,
 see below) calling `drawOrderEntry(ctx, entry, ...)` once per entry, instead
 of the old two fixed calls. `buildAnimatedWebp` needed zero changes to
 support any of this — it already accepted an arbitrary-length frame array.
+`#order-section` itself is shown whenever `frameCount() > 2` (as before) OR
+`state.interpolationCount > 0` (new) — a 2-frame set has nothing worth
+customizing about its order until interpolation makes the sequence longer
+than a plain flip, at which point editing it becomes useful there too.
+
+**The sequence strip (`#order-sequence-strip`, `renderOrderSequenceStrip`)
+shows every entry of `state.order` as a small thumbnail, not just the raw
+typed numbers.** Real frames use the frame's own `<img>` source; interpolated
+entries, once `getInterpolatedCanvas` has actually computed them, get their
+own fresh `<img>` via `canvas.toDataURL()` on a *copy* — never the cached
+canvas element itself, since the same `{a,b,t}` cache key inserted directly
+as a live DOM node could only ever live in one place at a time, and a
+repeated transition (not uncommon in a pendulum) would silently yank it out
+of an earlier thumbnail. Interpolated thumbnails get an always-visible
+"Interpolated" badge (unconditional — unlike the alignment strip's
+`.thumb-badge`, which is gated on a `.confirmed` class that doesn't apply
+here) and a fractional label (`formatInterpLabel`: linearly interpolate the
+two neighboring frames' integer labels by `t`, e.g. `a=0,b=1,t=0.5` → `"1.5"`)
+so its position in the sequence relative to its real neighbors is obvious at
+a glance. Re-rendered on every `state.order` reassignment (so it always
+matches what would actually export) and again once
+`scheduleInterpolationPrep`'s background pass finishes, so interpolated
+thumbnails upgrade from an empty placeholder box to the real blended content
+the moment it's ready — the same progressive-enhancement pattern the actual
+rendering path already uses. **Defensively skips any entry referencing a
+frame index that doesn't exist** (`state.frames[i]` missing) rather than
+throwing — this is a real, reachable case, not paranoia: `applyInterpolation(0)`
+resets the slider inside `load()` *before* that function has rebuilt
+`state.baseOrder`/`state.order` for the newly-uploaded images, so a
+just-replaced, now-oversized `state.order` briefly exists pointing at frames
+that no longer are there. (`load()`/`reset()` also now explicitly clear
+`state.baseOrder`/`state.order` up front, belt-and-suspenders alongside the
+per-entry guard.)
 
 **Interpolated (tweened) frames — real optical flow (OpenCV.js), with a
 rigid shift+crossfade fallback.** The "Interpolated frames" slider
