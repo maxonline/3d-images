@@ -1301,7 +1301,15 @@
     drawAlignmentCanvas();
     updateOffsetLabel();
     if (state.mode === 'ready') updateOutputSizeLabel();
-    if (lastHoverNative) maybeDrawMagnifier(lastHoverNative.x, lastHoverNative.y);
+    // The magnifier's zoomed view is a crop of the frame content itself, so
+    // any nudge invalidates it regardless of mouse position — always
+    // redraw at whatever point it's currently showing (hover position, or
+    // the default/override), not just when actively hovering. This used to
+    // be conditional on `lastHoverNative`, which silently left the
+    // magnifier stale after a keyboard-only nudge now that arrow keys work
+    // without ever hovering the canvas (see isArrowNavTarget above).
+    const { x: mx, y: my } = currentMagnifierLookNative();
+    drawMagnifier(mx, my);
   }
 
   alignCanvas.addEventListener('pointerdown', (e) => {

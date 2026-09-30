@@ -193,6 +193,21 @@ nudge. Verified with a Playwright test that presses arrow keys with the
 mouse parked far from the canvas and nothing ever clicked or focused —
 offset still changes.
 
+**`nudgeAlign`'s post-nudge magnifier refresh is unconditional, not gated
+on `lastHoverNative` — this was a real bug surfaced by making arrow keys
+hover-independent, not a new feature.** It used to only call
+`maybeDrawMagnifier` `if (lastHoverNative)`, which was fine back when
+nudging required hovering the canvas in the first place (hovering is
+exactly what sets `lastHoverNative`) — but now that arrow-key nudging
+works with the mouse anywhere on the page (see above), that condition is
+false for every keyboard-only nudge, silently leaving the magnifier
+showing stale, pre-nudge content indefinitely. The magnifier's zoomed view
+is a crop of the frame pixels themselves, so *any* alignment change
+invalidates it regardless of mouse position — `nudgeAlign` now always
+calls `drawMagnifier(mx, my)` with `currentMagnifierLookNative()`'s
+result (the same tracked point the crosshair reads, see below), matching
+what every other alignment-changing action (drag, undo) already does.
+
 **A small crosshair on the main align canvas marks exactly where the
 magnifier loupe is currently zoomed into.** Without it there was no way to
 tell, just by looking at the align canvas, what point the zoomed-in view
