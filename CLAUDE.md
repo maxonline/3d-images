@@ -212,13 +212,28 @@ default) becomes `[0,1,0]` before expanding — turning what used to be a
 hard flip-flop into a real pendulum with both the forward AND return legs
 smoothed — and `[0,1,2,3,2,1]` (the N=4 default, already pendulum-shaped
 for its *interior*) becomes `[0,1,2,3,2,1,0]`, additionally smoothing its
-own closing cut. Either way the sequence now starts and ends on the exact
-same real frame, so the animation's actual loop-back (GIF looping, or
-however the export is played back) sits between two identical images —
-genuinely seamless, not just "less jarring." `closeLoopForInterpolation`
-is a no-op when the order already closes itself (rare, but possible with a
-hand-typed custom order ending back at its own first frame) to avoid
-computing a pointless self-to-self flow pair. `drawOrderEntry` is the
+own closing cut. `closeLoopForInterpolation` is a no-op when the order
+already closes itself (rare, but possible with a hand-typed custom order
+ending back at its own first frame) to avoid computing a pointless
+self-to-self flow pair.
+
+**`orderForRendering` then drops the closing transition's own trailing
+real-frame entry — this was a real bug, caught from a user report, not a
+style choice.** `state.order` is played as a *loop* (GIF/WebP looping, the
+preview's modulo cycling) — closing it so the array starts and ends on the
+same real frame sounds like it'd make that loop seamless, but actually
+makes it worse: that shared frame renders TWICE in a row right at the loop
+point, once as the array's last entry and again as its first when the next
+lap begins (reported as "does two frames on last frame"). Every OTHER
+transition in the array writes its real endpoint once and then something
+ELSE follows; only the closing one is followed by nothing (the array just
+ends), so `orderForRendering` pops that one redundant trailing entry after
+expanding — `[0, i.., 1, i.., 0]` becomes `[0, i.., 1, i..]`, ending on the
+interpolated approach toward frame 0 rather than on frame 0 itself, since
+the loop wrap already supplies that exact frame via the array's own first
+element. The interpolated steps leading into it are untouched, so the
+closing transition stays exactly as smooth as every other one — frame 0
+now appears exactly once per lap instead of twice. `drawOrderEntry` is the
 single dispatcher every consumer of `state.order` goes through: a plain
 number still means "draw this real frame" exactly as before (so
 `state.interpolationCount === 0`, the default, is byte-for-byte identical

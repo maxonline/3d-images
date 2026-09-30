@@ -1437,9 +1437,26 @@
   // non-interpolated default order (state.baseOrder, what the order
   // textbox shows) is deliberately left alone; only ever closed here, for
   // rendering.
+  //
+  // state.order is played as a LOOP (GIF/WebP looping, or the preview's
+  // modulo cycling) — this was a real bug, caught after the fact, not just
+  // a theoretical concern: closing the loop makes the array start AND end
+  // on the exact same real frame, but that means the shared frame renders
+  // TWICE in a row right at the loop point (once as the array's last
+  // entry, again as its first when the next lap begins) — reported as
+  // "does two frames on last frame". Every OTHER transition in the array
+  // writes its real endpoint once and then something ELSE follows, so the
+  // fix is to drop just that one redundant trailing duplicate — the loop
+  // wrap already supplies that exact frame via the array's own first
+  // element, and the interpolated steps leading up to it are untouched, so
+  // the closing transition stays exactly as smooth as every other one.
   function orderForRendering(baseOrder, k) {
     if (k <= 0) return baseOrder.slice();
-    return withInterpolation(closeLoopForInterpolation(baseOrder), k);
+    const expanded = withInterpolation(closeLoopForInterpolation(baseOrder), k);
+    if (expanded.length > 1 && expanded[expanded.length - 1] === baseOrder[0]) {
+      expanded.pop();
+    }
+    return expanded;
   }
 
   function parseOrder(text, n) {
