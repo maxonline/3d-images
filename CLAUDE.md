@@ -504,6 +504,25 @@ region in native pixels; the "Output scale" slider only changes the
 *destination* size frames are drawn into at export time (`computeOutputSize`).
 Dragging/resizing the crop never touches this.
 
+**`state.outputScalePercent` is the sole source of truth for output size —
+the "Output width" textbox is just a second way to set the same value, not
+a separate mode.** Typing a width computes the equivalent percent
+(`scalePercentForWidth(width, cropWidth)`) and runs it through the exact
+same `applyScale` the % slider uses, so both stay in sync regardless of
+which one was actually touched, and `updateOutputSizeLabel` (called after
+any change to either scale or crop) resyncs the width textbox to
+`computeOutputSize().w` every time — including after a crop resize, so it
+never goes stale. Consequence worth knowing: because everything still
+funnels through one percent value with 1% granularity, an exact requested
+width like `1080` can land a few px off (e.g. `1075`) after rounding to the
+nearest whole percent — accepted, not worth a second independent
+width-driven code path just to close a few-pixel gap. `enterReadyMode`
+applies this once as the *default*, targeting `DEFAULT_OUTPUT_WIDTH = 1080`
+(clamped to 100% — never upscales past the crop's native resolution for a
+narrower crop) — same one-time-default treatment as brightness/contrast/hue
+already get, not a continuously-enforced constraint, so dragging the %
+slider or crop afterward behaves exactly as it already did.
+
 **No build step, on purpose.** Keep it a plain static site — if a dependency
 is needed, vendor its files into `web/lib/` (as done for gif.js and
 mp4-muxer.js) rather than introducing npm/bundlers.

@@ -38,6 +38,7 @@
 
   const scaleSlider = document.getElementById('scale-slider');
   const scaleValue = document.getElementById('scale-value');
+  const scaleWidthInput = document.getElementById('scale-width-input');
   const outputSizeLabel = document.getElementById('output-size-label');
   const resultSizeLabel = document.getElementById('result-size-label');
 
@@ -385,6 +386,24 @@
   function updateOutputSizeLabel() {
     const { w, h } = computeOutputSize();
     outputSizeLabel.textContent = `Output size: ${w} × ${h} px`;
+    // Keep the width textbox showing the actual current output width
+    // regardless of what last changed it — the scale slider, a crop
+    // resize, or the width box itself.
+    scaleWidthInput.value = w;
+  }
+
+  // scalePercentForWidth/DEFAULT_OUTPUT_WIDTH: converts a desired output
+  // WIDTH in px into the equivalent outputScalePercent, the single source
+  // of truth computeOutputSize() actually reads — the width textbox is
+  // just another way to set that same percentage, not a separate mode, so
+  // resizing the crop afterward keeps behaving exactly like it already did
+  // (output size scales proportionally with the crop, same as dragging the
+  // % slider always has). Clamped to the slider's own [10,100] range —
+  // can't request upscaling past the crop's native resolution.
+  const DEFAULT_OUTPUT_WIDTH = 1080;
+
+  function scalePercentForWidth(width, cropWidth) {
+    return Math.max(10, Math.min(100, Math.round((width / cropWidth) * 100)));
   }
 
   function sourceRectFor(frameIndex, crop, offsetOverride) {
@@ -1234,6 +1253,7 @@
     resetCropToOverlap();
     recomputeAlignScale();
     recomputePreviewScale();
+    applyScale(scalePercentForWidth(DEFAULT_OUTPUT_WIDTH, state.crop.w));
 
     state.baseOrder = defaultOrder(frameCount());
     orderInput.value = formatOrder(state.baseOrder);
@@ -1359,9 +1379,25 @@
   const applyHue = linkSliderWithNumber(hueSlider, hueValue, (v) => {
     state.adjust.hue = v;
   });
-  linkSliderWithNumber(scaleSlider, scaleValue, (v) => {
+  const applyScale = linkSliderWithNumber(scaleSlider, scaleValue, (v) => {
     state.outputScalePercent = v;
     updateOutputSizeLabel();
+  });
+
+  // A direct alternative to the % slider: type a target width in px and
+  // derive the equivalent outputScalePercent from it, going through the
+  // exact same applyScale (so the % slider/number box stay in sync too —
+  // there's only ever one underlying value, state.outputScalePercent).
+  scaleWidthInput.addEventListener('input', () => {
+    if (scaleWidthInput.value === '' || state.crop.w <= 0) return;
+    const desiredWidth = Number(scaleWidthInput.value);
+    if (!Number.isFinite(desiredWidth) || desiredWidth <= 0) return;
+    applyScale(scalePercentForWidth(desiredWidth, state.crop.w));
+  });
+  // Left empty/invalid: snap back to the actual current output width,
+  // same recovery behavior linkSliderWithNumber's pairs already have.
+  scaleWidthInput.addEventListener('blur', () => {
+    scaleWidthInput.value = computeOutputSize().w;
   });
 
   colorModeRadios.forEach((radio) => {
