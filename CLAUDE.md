@@ -834,6 +834,27 @@ get, not a continuously-enforced constraint.
 is needed, vendor its files into `web/lib/` (as done for gif.js and
 mp4-muxer.js) rather than introducing npm/bundlers.
 
+**The site is always dark (black background, white/gray text) — not
+conditional on the visitor's system preference.** `style.css`'s `:root`
+used to define a light palette plus a `@media (prefers-color-scheme: dark)`
+override; per explicit request it's now just one unconditional dark
+palette (`--bg: #000000`, `--fg: #f0f0f0`, `--muted: #a8a8a8`, `--border:
+#3a3a3a`, `--accent: #60a5fa`, carried over from the old dark override
+values, just applied unconditionally) and `color-scheme: dark` (not `light
+dark`) so native form controls — range sliders, radio buttons, checkboxes,
+number-input spinners, the file-picker button — render with the browser's
+own dark styling too, not just the custom-styled elements. This "just
+works" with effectively zero other CSS changes because every rule in this
+file already routed color through `var(--bg)`/`var(--fg)`/`var(--muted)`/
+`var(--border)`/`var(--accent)` rather than hardcoding light-mode colors
+anywhere — the align/preview/magnifier canvases already had an explicit
+`background: #000` for unrelated reasons (matching the letterboxing around
+non-matching-aspect-ratio frames) so they needed no change at all to blend
+into the new page background. Verified by forcing Playwright's browser
+context to `colorScheme: 'light'` and confirming the page still renders
+fully black/white regardless — proof it's truly unconditional, not
+accidentally still gated on the media query.
+
 ## Testing
 
 There's no test suite and no sample images kept in the repo (the original
