@@ -1476,20 +1476,19 @@
   // a nicety: a canvas-scoped listener only fires while the canvas itself
   // has keyboard focus, but focus moves away from it constantly (clicking
   // a slider, typing in the order textbox, toggling a radio), and requiring
-  // a user to click back onto the canvas before arrow keys work again is
-  // exactly the kind of friction Space-to-move-crop below already solved
-  // the same way for the same reason. Gated on `pointerOverAlignCanvas`
-  // (hovering, same flag the Space listener uses) OR the canvas actually
-  // being focused (so keyboard-only/no-mouse use — e.g. tabbing to the
-  // canvas — still works). Deliberately checks `isArrowNavTarget`, NOT the
-  // broader `isTypingTarget` the Space listener below uses: a range slider
-  // or radio button is an <input> too, and Space should indeed leave those
-  // alone (Space activates/steps them), but arrow keys only have a
-  // *conflicting* native meaning on controls that use them for text-cursor
-  // or value navigation (text/number inputs, textareas) — if a slider
-  // merely still has focus from an earlier click while the mouse now
-  // hovers the canvas, hovering wins and arrows nudge, matching what the
-  // user is actually pointing at rather than stale focus elsewhere.
+  // a user to click back onto the canvas before arrow keys work again was
+  // exactly the friction reported. An earlier version of this fix also
+  // required hovering the canvas (gated on `pointerOverAlignCanvas`,
+  // mirroring the Space-to-move-crop listener below) — reasonable in
+  // theory, but reported back as still not working reliably without an
+  // explicit prior click, and arrow keys don't actually have a second
+  // competing meaning on this page worth disambiguating by mouse position
+  // the way Space genuinely does (Space also activates/steps whatever
+  // control happens to be focused). So this is unconditional instead: any
+  // arrow key, any time frames are loaded, nudges alignment — gated only
+  // on not being in the middle of typing/spinning a value in a text or
+  // number field (`isArrowNavTarget`), where arrow keys keep their native
+  // cursor/spin meaning.
   function isArrowNavTarget(el) {
     if (!el) return false;
     if (el.tagName === 'TEXTAREA') return true;
@@ -1499,8 +1498,8 @@
     const steps = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     const step = steps[e.key];
     if (!step) return;
+    if (state.frames.length === 0) return;
     if (isArrowNavTarget(document.activeElement)) return;
-    if (!pointerOverAlignCanvas && document.activeElement !== alignCanvas) return;
     e.preventDefault();
     nudgeAlign(step[0], step[1]);
   });

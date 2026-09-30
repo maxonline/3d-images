@@ -165,30 +165,33 @@ both `load()` and `reset()`, matching every other per-session alignment
 state, so a fresh upload always starts back at frame 0's center rather than
 inheriting a click position from a previous session's image geometry.
 
-**Arrow-key nudging is listened for on `window`, not the canvas — this was
-a real bug, not just a nicety.** A canvas-scoped `keydown` listener only
-fires while the canvas itself holds keyboard focus, but focus moves away
-from it constantly in normal use (clicking a slider, typing in the order
-textbox, toggling a radio), and requiring a click back onto the canvas
-before arrow keys work again was exactly the friction Space-to-move-crop
-above already solved the same way for the same reason, so arrow nudging
-gets the identical fix. Gated on `pointerOverAlignCanvas` (the same hover
-flag Space uses) OR the canvas actually being focused, so both a mouse user
-who's merely hovering (no click needed) and a keyboard-only user who
-tabbed onto the canvas keep working. **Deliberately uses a narrower guard
-than Space's `isTypingTarget`, not the same one — this distinction matters
-and was caught by a test, not assumed:** Space must leave every `<input>`
-alone (a checkbox, radio, or range slider all treat Space as
-click-it/step-it), but arrow keys only *conflict* with controls that use
-them for text-cursor or value navigation — a range slider merely still
-holding focus from an earlier click, while the mouse now hovers the
-canvas, should let the hover win, not the stale focus. `isArrowNavTarget`
-checks `<textarea>` or `<input type="text"|"number">` specifically, so
-e.g. the brightness slider being focused no longer silently blocks
-hovering-canvas arrow-nudge — verified with a Playwright test that
-explicitly focuses `#brightness-slider`, hovers the canvas, and confirms
-the offset still changes (this exact scenario failed under the broader
-`isTypingTarget` guard on the first pass and had to be narrowed).
+**Arrow-key nudging is listened for on `window`, not the canvas, and is
+unconditional once frames are loaded — not gated on hovering or focusing
+the canvas at all.** A canvas-scoped `keydown` listener only fires while
+the canvas itself holds keyboard focus, but focus moves away from it
+constantly in normal use (clicking a slider, typing in the order textbox,
+toggling a radio), and requiring a click back onto the canvas before arrow
+keys work again was the original reported friction. The first fix attempt
+gated the window listener on `pointerOverAlignCanvas` (the same hover flag
+Space-to-move-crop uses) OR the canvas being focused — reasonable in
+theory, mirroring how Space already disambiguates, but it was reported
+back as still unreliable in practice (arrows only reliably worked after an
+explicit click onto the canvas first, hovering alone wasn't enough) and
+got simplified away rather than debugged further, because **arrow keys
+don't actually have Space's dual-meaning problem to disambiguate**: Space
+must stay scoped to "only when hovering the canvas" because Space also
+activates/steps whatever control happens to be focused elsewhere (a
+button, a checkbox, a radio) — arrow keys have no such competing meaning
+anywhere else on this page outside actual text-cursor/value-spinner
+controls. So the listener now fires for *any* arrow key, *any* time
+`state.frames.length > 0`, regardless of mouse position or focus, gated
+only on `isArrowNavTarget(document.activeElement)` — `<textarea>` or
+`<input type="text"|"number">` specifically, so e.g. the order textbox and
+the output-width number box keep their native cursor/spin behavior, but a
+range slider (brightness, etc.) merely holding focus does not block a
+nudge. Verified with a Playwright test that presses arrow keys with the
+mouse parked far from the canvas and nothing ever clicked or focused —
+offset still changes.
 
 **A small crosshair on the main align canvas marks exactly where the
 magnifier loupe is currently zoomed into.** Without it there was no way to
