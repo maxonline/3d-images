@@ -9,12 +9,18 @@
   const magnifierCtx = magnifierCanvas.getContext('2d');
   const alignOffsetLabel = document.getElementById('align-offset-label');
   const alignMagnifierColEl = document.getElementById('align-magnifier-col');
+  const nudgeUpBtn = document.getElementById('nudge-up');
+  const nudgeDownBtn = document.getElementById('nudge-down');
+  const nudgeLeftBtn = document.getElementById('nudge-left');
+  const nudgeRightBtn = document.getElementById('nudge-right');
 
   const frameThumbSectionEl = document.getElementById('frame-thumb-section');
   const thumbStripEl = document.getElementById('thumb-strip');
   const alignHintEl = document.getElementById('align-hint');
+  const undoBtn = document.getElementById('undo-btn');
 
   const cropRatioSectionEl = document.getElementById('crop-ratio-section');
+  const lockAlignmentCheckbox = document.getElementById('lock-alignment-checkbox');
   const cropExportPanelEl = document.getElementById('crop-export-panel');
 
   const orderSectionEl = document.getElementById('order-section');
@@ -161,6 +167,7 @@
     baseName: 'wiggle',
     crop: { x: 0, y: 0, w: 0, h: 0 },
     cropRatio: null, // locked width/height ratio, or null for free-form
+    alignmentLocked: false, // when true, a plain drag moves the crop instead of aligning — no Space needed
     adjust: { brightness: 0, contrast: 0, hue: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
@@ -973,19 +980,35 @@
     magnifierCtx.stroke();
   }
 
-  function hideMagnifier() {
-    magnifierCtx.clearRect(0, 0, magnifierCanvas.width, magnifierCanvas.height);
+  // Center of frame 0 (the anchor) in native coordinates — the magnifier's
+  // resting position whenever the pointer isn't actively over the canvas,
+  // so there's always something useful showing rather than a blank box.
+  function magnifierDefaultNative() {
+    return { x: state.W / 2, y: state.H / 2 };
   }
 
-  // Only show the magnifier while the align/crop canvas is actually
-  // selected (focused) — hovering over it without having clicked/tabbed
-  // into it first shouldn't pop up the zoom view.
-  function maybeDrawMagnifier(nativeX, nativeY) {
-    if (document.activeElement === alignCanvas) {
-      drawMagnifier(nativeX, nativeY);
-    } else {
-      hideMagnifier();
+  // Shows the default centered-on-frame-1 view (or clears, if no frames are
+  // loaded yet — e.g. right after reset()). Replaces the old hideMagnifier:
+  // previously this cleared the canvas whenever the pointer left it or the
+  // canvas lost focus; now it resets to a useful default instead of going
+  // blank, per request. Every previous hideMagnifier() call site just needed
+  // its name updated to match — the "show a neutral/reset view" intent at
+  // each of those call sites is unchanged.
+  function resetMagnifierToDefault() {
+    if (state.frames.length === 0) {
+      magnifierCtx.clearRect(0, 0, magnifierCanvas.width, magnifierCanvas.height);
+      return;
     }
+    const { x, y } = magnifierDefaultNative();
+    drawMagnifier(x, y);
+  }
+
+  // No longer gated on the canvas having focus — the magnifier is always
+  // showing *something* now (the hover position, or the default view), so
+  // requiring a prior click/tab before it responds to hover doesn't fit
+  // that model anymore.
+  function maybeDrawMagnifier(nativeX, nativeY) {
+    drawMagnifier(nativeX, nativeY);
   }
 
   function drawCropOverlay() {
@@ -1020,18 +1043,24 @@
   const CURSOR_BY_HANDLE = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize' };
 
   function updateAlignHoverCursor(clientX, clientY) {
-    // Space overrides hit-testing entirely (matches pointerdown) — 'move'
-    // rather than 'grab' so it's visually distinct from a normal align
-    // drag, which uses 'grab' for the exact same "nothing under the
-    // pointer" case.
-    if (spacePressed && state.mode === 'ready') {
-      alignCanvas.style.cursor = 'move';
-      return;
-    }
     const { x: cx, y: cy } = clientToCanvasXY(alignCanvas, clientX, clientY);
     const hit = hitTestCrop(cx, cy);
     if (hit) {
       alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
+      return;
+    }
+    // Space, or the "Lock alignment" checkbox, both mean a plain drag moves
+    // the crop instead of aligning — 'move' rather than 'grab' so it's
+    // visually distinct from a normal align drag, which uses 'grab' for the
+    // exact same "nothing under the pointer" case.
+    if ((spacePressed || state.alignmentLocked) && state.mode === 'ready') {
+      alignCanvas.style.cursor = 'move';
+      return;
+    }
+    // Locked but not in ready mode yet (still stepping, no crop rect to move
+    // at all) — nothing sensible for a plain drag to do here.
+    if (state.alignmentLocked) {
+      alignCanvas.style.cursor = 'default';
       return;
     }
     alignCanvas.style.cursor = 'grab';
@@ -1080,7 +1109,46 @@
     if (state.mode === 'ready') drawCropOverlay();
   }
 
+  // Single-level undo, not a full history stack — deliberately scoped to
+  // exactly the accidental-drag problem this was requested for ("I often
+  // try to move crop without pressing Space"): one snapshot, taken right
+  // before any align-drag, crop-resize-drag, crop-move-drag, or nudge,
+  // overwriting whatever was captured before. Only the most recent of
+  // those four kinds of action can be undone, not an arbitrary number of
+  // steps back — simpler to reason about and covers the actual complaint.
+  let undoSnapshot = null;
+
+  function captureUndoSnapshot() {
+    undoSnapshot = {
+      frames: state.frames.map((f) => ({ dx: f.dx, dy: f.dy })),
+      crop: { ...state.crop },
+    };
+    undoBtn.disabled = false;
+  }
+
+  function performUndo() {
+    if (!undoSnapshot) return;
+    state.frames.forEach((f, i) => {
+      f.dx = undoSnapshot.frames[i].dx;
+      f.dy = undoSnapshot.frames[i].dy;
+    });
+    state.crop = { ...undoSnapshot.crop };
+    undoSnapshot = null;
+    undoBtn.disabled = true;
+    clearInterpolationCaches();
+    scheduleInterpolationPrep();
+    if (state.mode === 'ready') recomputePreviewScale();
+    drawAlignmentCanvas();
+    updateOffsetLabel();
+    if (state.mode === 'ready') updateOutputSizeLabel();
+    resetMagnifierToDefault();
+  }
+
+  undoBtn.addEventListener('click', performUndo);
+
   function nudgeAlign(ddx, ddy) {
+    if (state.alignmentLocked) return;
+    captureUndoSnapshot();
     const f = state.frames[activeAlignFrameIndex()];
     const clamped = clampAlign(f.dx + ddx, f.dy + ddy, state.W, state.H);
     f.dx = clamped.dx;
@@ -1103,10 +1171,27 @@
     alignCanvas.setPointerCapture(e.pointerId);
     alignCanvas.focus();
 
-    // Space overrides everything else — moving the whole crop rect at its
-    // current size, regardless of whether the pointer happens to be over a
-    // resize handle or not.
-    if (spacePressed && state.mode === 'ready') {
+    // A corner handle always resizes the crop, regardless of Space/lock —
+    // those two only change what a PLAIN drag elsewhere on the canvas does.
+    if (hit) {
+      captureUndoSnapshot();
+      alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
+      state.drag = {
+        kind: 'crop-resize',
+        handle: hit.handle,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startCrop: { ...state.crop },
+      };
+      return;
+    }
+
+    // Space, or the "Lock alignment" checkbox, both mean this drag moves
+    // the crop rect instead of aligning — locking makes Space unnecessary
+    // (every plain drag already goes here), but holding Space still works
+    // the same way regardless, so there's no conflict between the two.
+    if ((spacePressed || state.alignmentLocked) && state.mode === 'ready') {
+      captureUndoSnapshot();
       alignCanvas.style.cursor = 'grabbing';
       state.drag = {
         kind: 'crop-move',
@@ -1117,28 +1202,22 @@
       return;
     }
 
-    if (hit) {
-      alignCanvas.style.cursor = CURSOR_BY_HANDLE[hit.handle];
-      state.drag = {
-        kind: 'crop-resize',
-        handle: hit.handle,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startCrop: { ...state.crop },
-      };
-    } else {
-      const targetFrame = activeAlignFrameIndex();
-      const f = state.frames[targetFrame];
-      alignCanvas.style.cursor = 'grabbing';
-      state.drag = {
-        kind: 'align',
-        frameIndex: targetFrame,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startDx: f.dx,
-        startDy: f.dy,
-      };
-    }
+    // Locked but not ready yet (still stepping — no crop rect exists to
+    // move) — nothing sensible for a plain drag to do.
+    if (state.alignmentLocked) return;
+
+    captureUndoSnapshot();
+    const targetFrame = activeAlignFrameIndex();
+    const f = state.frames[targetFrame];
+    alignCanvas.style.cursor = 'grabbing';
+    state.drag = {
+      kind: 'align',
+      frameIndex: targetFrame,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startDx: f.dx,
+      startDy: f.dy,
+    };
   });
 
   let lastHoverNative = null; // last mouse position in native coords, for re-drawing the magnifier after a keyboard nudge
@@ -1195,11 +1274,11 @@
     pointerOverAlignCanvas = false;
     if (state.drag) return; // pointer capture keeps a drag going even once the cursor visually leaves
     lastHoverNative = null;
-    hideMagnifier();
+    resetMagnifierToDefault();
   });
 
   alignCanvas.addEventListener('blur', () => {
-    hideMagnifier();
+    resetMagnifierToDefault();
   });
 
   function endAlignCanvasDrag(e) {
@@ -1227,6 +1306,16 @@
     e.preventDefault();
     nudgeAlign(step[0], step[1]);
   });
+
+  // On-screen equivalent of the arrow-key nudge above, for touch devices —
+  // phones have no keyboard, so the 1-native-px-per-press fine alignment
+  // the keyboard shortcut offers would otherwise be unreachable on mobile.
+  // Goes through the exact same nudgeAlign (1px per press, same clamping,
+  // same undo-snapshot/lock-guard behavior) — not a separate code path.
+  nudgeUpBtn.addEventListener('click', () => nudgeAlign(0, -1));
+  nudgeDownBtn.addEventListener('click', () => nudgeAlign(0, 1));
+  nudgeLeftBtn.addEventListener('click', () => nudgeAlign(-1, 0));
+  nudgeRightBtn.addEventListener('click', () => nudgeAlign(1, 0));
 
   // Hold Space to move the crop rect instead of aligning/resizing — the one
   // interaction the canvas couldn't otherwise offer, per the deliberate
@@ -1351,7 +1440,7 @@
     updateOffsetLabel();
     updateThumbnailStripState();
     lastHoverNative = null;
-    hideMagnifier();
+    resetMagnifierToDefault();
   }
 
   // The one-time transition once every frame has been confirmed at least
@@ -1376,7 +1465,7 @@
     updateGenerateButtonsDisabled();
 
     lastHoverNative = null;
-    hideMagnifier();
+    resetMagnifierToDefault();
     startPreviewLoop();
   }
 
@@ -1530,6 +1619,18 @@
       drawAlignmentCanvas();
       updateOutputSizeLabel();
     });
+  });
+
+  lockAlignmentCheckbox.addEventListener('change', () => {
+    state.alignmentLocked = lockAlignmentCheckbox.checked;
+    // The pointer is over the checkbox, not the canvas, right now, so
+    // there's no handle it could be hovering — just set the plain-drag
+    // cursor directly rather than re-running full hit-testing.
+    if (state.alignmentLocked) {
+      alignCanvas.style.cursor = state.mode === 'ready' ? 'move' : 'default';
+    } else {
+      alignCanvas.style.cursor = 'grab';
+    }
   });
 
   // Anaglyph tint is inherently a 2-view concept — disable it once there are
@@ -2064,6 +2165,10 @@
     state.adjust.colorMode = 'normal';
     cropRatioRadios.forEach((radio) => { radio.checked = radio.value === 'none'; });
     state.cropRatio = null;
+    lockAlignmentCheckbox.checked = false;
+    state.alignmentLocked = false;
+    undoSnapshot = null;
+    undoBtn.disabled = true;
 
     updateColorModeAvailability();
     updateAlignHint();
@@ -2074,7 +2179,7 @@
     outputEl.hidden = true;
     resultSizeLabel.textContent = '';
     lastHoverNative = null;
-    hideMagnifier();
+    resetMagnifierToDefault();
 
     if (frameCount() > 2) {
       state.mode = 'stepping';
@@ -2102,6 +2207,10 @@
     state.mode = 'ready';
     state.alignStep = { current: 1, confirmed: [] };
     state.crop = { x: 0, y: 0, w: 0, h: 0 };
+    state.alignmentLocked = false;
+    lockAlignmentCheckbox.checked = false;
+    undoSnapshot = null;
+    undoBtn.disabled = true;
     thumbStripEl.innerHTML = '';
     frameThumbSectionEl.hidden = true;
     orderSequenceStripEl.innerHTML = '';

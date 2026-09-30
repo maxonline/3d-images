@@ -41,6 +41,7 @@
   <section id="editor" hidden>
     <h2>Align &amp; crop</h2>
     <p class="hint" id="align-hint">Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.</p>
+    <button type="button" id="undo-btn" class="secondary-btn" disabled>Undo last drag</button>
 
     <section id="frame-thumb-section" hidden>
       <div class="thumb-strip" id="thumb-strip"></div>
@@ -60,6 +61,10 @@
         <label><input type="radio" name="crop-ratio" value="16:9"> 16:9</label>
         <label><input type="radio" name="crop-ratio" value="1.91:1"> 1.91:1</label>
       </fieldset>
+      <label class="lock-align-label">
+        <input type="checkbox" id="lock-alignment-checkbox">
+        Lock alignment (drag moves crop instead)
+      </label>
     </section>
 
     <div class="align-row">
@@ -68,6 +73,12 @@
       </div>
       <div class="align-magnifier" id="align-magnifier-col">
         <canvas id="magnifier-canvas" width="320" height="320" aria-label="Zoomed view under cursor"></canvas>
+        <div class="nudge-pad" id="nudge-pad" aria-label="Nudge alignment">
+          <button type="button" class="nudge-btn nudge-up" id="nudge-up" aria-label="Nudge up">&#9650;</button>
+          <button type="button" class="nudge-btn nudge-left" id="nudge-left" aria-label="Nudge left">&#9664;</button>
+          <button type="button" class="nudge-btn nudge-right" id="nudge-right" aria-label="Nudge right">&#9654;</button>
+          <button type="button" class="nudge-btn nudge-down" id="nudge-down" aria-label="Nudge down">&#9660;</button>
+        </div>
         <p class="hint" id="align-offset-label">Offset: 0, 0 px</p>
       </div>
     </div>

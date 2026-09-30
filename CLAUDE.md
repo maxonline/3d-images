@@ -94,6 +94,65 @@ time; releasing Space mid-drag doesn't retroactively change what an
 already-started `crop-move` drag is doing, matching how e.g. `crop-resize`
 already commits to one handle for the drag's whole duration.
 
+**"Lock alignment" (`state.alignmentLocked`, the checkbox in
+`#crop-ratio-section`) makes a plain drag behave like Space was already
+held, everywhere a plain drag is checked.** It's a second, sticky way to
+get "drag moves crop" without holding a key down — requested specifically
+because dragging without remembering to hold Space was a common mistake.
+`pointerdown`'s and `updateAlignHoverCursor`'s conditions both changed from
+`spacePressed && ready` to `(spacePressed || state.alignmentLocked) && ready`
+— Space and the lock aren't exclusive, just two ways to reach the same
+state, so holding Space while also locked changes nothing. Corner handles
+still always resize regardless of either (checked first, before the
+space-or-lock branch). Locked but still in `'stepping'` mode (no crop rect
+exists yet to move) is a deliberate no-op on `pointerdown` — there's
+nothing sensible for a plain drag to do there, so it's just ignored rather
+than erroring.
+
+**Single-level undo (`undoBtn`, `captureUndoSnapshot`/`performUndo`) —
+scoped tightly to the actual complaint, not a general history stack.**
+Requested for the same "dragged without pressing Space" mistake the lock
+checkbox addresses from a different angle: one snapshot of
+`state.frames[].dx/dy` + `state.crop`, taken right before *any*
+align-drag, crop-resize-drag, crop-move-drag, or nudge (`captureUndoSnapshot`,
+called from all four of those, both from `pointerdown` and from
+`nudgeAlign` itself so the on-screen nudge pad and the keyboard arrow keys
+share the exact same capture point). Each capture **overwrites** the
+previous one — only the most recent of those four action kinds can be
+undone, not an arbitrary number of steps back. This is a real, intentional
+scope decision, not a missing feature: a full undo/redo stack would need
+tracking far more than just frame offsets and crop (order, adjustments,
+crop ratio...) to be consistent, and the actual request was specifically
+about recovering from one accidental drag, not general history. The
+button is disabled whenever there's nothing to undo and re-disables itself
+after a single use (`performUndo` clears `undoSnapshot` and can't be
+chained into "undo the undo").
+
+**The magnifier now always shows *something* — centered on frame 0 by
+default, hover position while the pointer's over the canvas — rather than
+appearing only while focused and disappearing otherwise.** This replaced
+the previous focus-gated, hide-on-blur behavior outright, not just a
+default-value tweak: `maybeDrawMagnifier` no longer checks
+`document.activeElement === alignCanvas` at all (every hover now draws,
+regardless of focus), and every previous `hideMagnifier()` call site (drag
+end, pointer leaving the canvas, blur, a fresh upload, selecting a
+different frame to align) now calls `resetMagnifierToDefault()` instead —
+same call sites, same "go back to a neutral view" intent, just showing
+`magnifierDefaultNative()` (`{x: state.W/2, y: state.H/2}`, frame 0's
+center) through the exact same `drawMagnifier` used for hover, rather than
+clearing the canvas. `resetMagnifierToDefault` guards the one case where
+clearing is still actually correct — no frames loaded at all yet (e.g.
+right after `reset()`), when there's nothing to draw a zoomed view *of*.
+
+**The nudge pad (`#nudge-pad`, four buttons below the magnifier) is a
+touch-accessible equivalent of the arrow-key shortcut, not a separate
+implementation — phones have no keyboard, so 1-native-px-per-press fine
+alignment would otherwise be unreachable on mobile.** Each button's click
+handler just calls `nudgeAlign(ddx, ddy)` directly, the exact same
+function the keyboard listener already called — same 1px step, same
+`clampAlign`, same lock-guard, same undo-snapshot capture, automatically,
+with no new logic of its own.
+
 **The crop rectangle is always clamped inside the overlap.** `state.crop`
 must stay within `currentOverlapRect()` — enforced by
 `clampCropToOverlap`/`clampResizeCrop` after every alignment or crop change.
