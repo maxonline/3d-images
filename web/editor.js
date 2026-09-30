@@ -1212,7 +1212,14 @@
   // because drawMagnifier only touches the separate magnifier canvas and a
   // later drawAlignmentCanvas() call (e.g. mid-drag) would otherwise wipe
   // out a crosshair drawn directly onto the main canvas moments earlier.
+  // Hidden while actively hovering (`lastHoverNative` set): the real mouse
+  // cursor already marks that exact spot, so the crosshair would just be a
+  // redundant, slightly-offset duplicate sitting right on top of it — it's
+  // only useful once the pointer's elsewhere (or never moved at all, e.g.
+  // after a keyboard-only nudge) and there's nothing else on screen showing
+  // where the loupe is looking.
   function drawMagnifierCrosshair() {
+    if (lastHoverNative) return;
     const { x: nx, y: ny } = currentMagnifierLookNative();
     const { x, y } = toAlignCanvasXY(nx, ny);
     const r = 11; // canvas-space px, crosshair arm length — fixed, doesn't scale with zoom
@@ -1480,34 +1487,24 @@
 
   // Arrow keys nudge alignment by exactly 1 native image pixel per press —
   // finer than mouse dragging can reach once the canvas is scaled down.
-  // Listened for on window, not the canvas — this was a real bug, not just
-  // a nicety: a canvas-scoped listener only fires while the canvas itself
-  // has keyboard focus, but focus moves away from it constantly (clicking
-  // a slider, typing in the order textbox, toggling a radio), and requiring
-  // a user to click back onto the canvas before arrow keys work again was
-  // exactly the friction reported. An earlier version of this fix also
-  // required hovering the canvas (gated on `pointerOverAlignCanvas`,
-  // mirroring the Space-to-move-crop listener below) — reasonable in
-  // theory, but reported back as still not working reliably without an
-  // explicit prior click, and arrow keys don't actually have a second
-  // competing meaning on this page worth disambiguating by mouse position
-  // the way Space genuinely does (Space also activates/steps whatever
-  // control happens to be focused). So this is unconditional instead: any
-  // arrow key, any time frames are loaded, nudges alignment — gated only
-  // on not being in the middle of typing/spinning a value in a text or
-  // number field (`isArrowNavTarget`), where arrow keys keep their native
-  // cursor/spin meaning.
-  function isArrowNavTarget(el) {
-    if (!el) return false;
-    if (el.tagName === 'TEXTAREA') return true;
-    return el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number');
-  }
-  window.addEventListener('keydown', (e) => {
+  // Deliberately scoped to "the canvas is focused," nothing looser: two
+  // broader versions were tried and both backfired. Hover-or-focus (mirroring
+  // Space-to-move-crop) was reported as unreliable without an explicit
+  // prior click; fully unconditional (any arrow key, anywhere on the page,
+  // once frames are loaded) was reported back as confusing and error-prone
+  // — arrow keys doing something as soon as frames exist, regardless of
+  // where the user's attention actually is, isn't an acceptable trade for
+  // not having to click the canvas first. Requiring focus means a single
+  // click onto the canvas (which this app's click-vs-drag threshold
+  // already treats as a harmless no-op elsewhere, see
+  // magnifierDefaultOverride above) is what turns arrow keys on, and
+  // normal focus changes (clicking a slider, typing in the order textbox)
+  // turn them back off — predictable, and exactly the behavior already
+  // confirmed to work.
+  alignCanvas.addEventListener('keydown', (e) => {
     const steps = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     const step = steps[e.key];
     if (!step) return;
-    if (state.frames.length === 0) return;
-    if (isArrowNavTarget(document.activeElement)) return;
     e.preventDefault();
     nudgeAlign(step[0], step[1]);
   });

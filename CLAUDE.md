@@ -165,48 +165,46 @@ both `load()` and `reset()`, matching every other per-session alignment
 state, so a fresh upload always starts back at frame 0's center rather than
 inheriting a click position from a previous session's image geometry.
 
-**Arrow-key nudging is listened for on `window`, not the canvas, and is
-unconditional once frames are loaded — not gated on hovering or focusing
-the canvas at all.** A canvas-scoped `keydown` listener only fires while
-the canvas itself holds keyboard focus, but focus moves away from it
-constantly in normal use (clicking a slider, typing in the order textbox,
-toggling a radio), and requiring a click back onto the canvas before arrow
-keys work again was the original reported friction. The first fix attempt
-gated the window listener on `pointerOverAlignCanvas` (the same hover flag
-Space-to-move-crop uses) OR the canvas being focused — reasonable in
-theory, mirroring how Space already disambiguates, but it was reported
-back as still unreliable in practice (arrows only reliably worked after an
-explicit click onto the canvas first, hovering alone wasn't enough) and
-got simplified away rather than debugged further, because **arrow keys
-don't actually have Space's dual-meaning problem to disambiguate**: Space
-must stay scoped to "only when hovering the canvas" because Space also
-activates/steps whatever control happens to be focused elsewhere (a
-button, a checkbox, a radio) — arrow keys have no such competing meaning
-anywhere else on this page outside actual text-cursor/value-spinner
-controls. So the listener now fires for *any* arrow key, *any* time
-`state.frames.length > 0`, regardless of mouse position or focus, gated
-only on `isArrowNavTarget(document.activeElement)` — `<textarea>` or
-`<input type="text"|"number">` specifically, so e.g. the order textbox and
-the output-width number box keep their native cursor/spin behavior, but a
-range slider (brightness, etc.) merely holding focus does not block a
-nudge. Verified with a Playwright test that presses arrow keys with the
-mouse parked far from the canvas and nothing ever clicked or focused —
-offset still changes.
+**Arrow-key nudging requires the canvas to actually be focused —
+deliberately, after two broader alternatives were each tried and rejected
+for real, reported reasons, not assumed.** The natural instinct is to
+widen this (a canvas-scoped `keydown` listener only fires while the canvas
+itself holds focus, and focus moves away from it constantly — clicking a
+slider, typing in the order textbox — so requiring a click back onto the
+canvas first reads as pure friction), and two widenings were tried in that
+order: (1) a `window`-level listener gated on `pointerOverAlignCanvas`
+(hover) OR focus, mirroring how Space-to-move-crop disambiguates — reported
+back as unreliable, arrows only reliably worked after an explicit prior
+click, hovering alone often didn't register; (2) fully unconditional (any
+arrow key, anywhere on the page, the instant frames are loaded, gated only
+on not typing in a text/number field) — reported back as confusing and
+error-prone, arrow keys doing something regardless of where the user's
+actual attention is isn't an acceptable trade just to skip one click.
+Landed back on plain focus-required — `alignCanvas.addEventListener('keydown', ...)`,
+no window-level listener, no `isArrowNavTarget` helper needed since a
+focused canvas can't simultaneously be a focused text input — because
+that's both the simplest implementation and the one combination already
+confirmed to work reliably: click the canvas once (a low-cost action this
+app's click-vs-drag threshold already treats as a no-op elsewhere — see
+`magnifierDefaultOverride` above) to turn arrow keys on, and any ordinary
+focus change turns them back off. If a future report asks for less
+friction again, the fix is NOT to re-loosen this gate — dig into why the
+hover signal itself was unreliable first, since both rejected attempts
+failed for reasons unrelated to how tight the gate was.
 
 **`nudgeAlign`'s post-nudge magnifier refresh is unconditional, not gated
-on `lastHoverNative` — this was a real bug surfaced by making arrow keys
-hover-independent, not a new feature.** It used to only call
-`maybeDrawMagnifier` `if (lastHoverNative)`, which was fine back when
-nudging required hovering the canvas in the first place (hovering is
-exactly what sets `lastHoverNative`) — but now that arrow-key nudging
-works with the mouse anywhere on the page (see above), that condition is
-false for every keyboard-only nudge, silently leaving the magnifier
-showing stale, pre-nudge content indefinitely. The magnifier's zoomed view
-is a crop of the frame pixels themselves, so *any* alignment change
-invalidates it regardless of mouse position — `nudgeAlign` now always
-calls `drawMagnifier(mx, my)` with `currentMagnifierLookNative()`'s
-result (the same tracked point the crosshair reads, see below), matching
-what every other alignment-changing action (drag, undo) already does.
+on `lastHoverNative`.** It used to only call `maybeDrawMagnifier`
+`if (lastHoverNative)` — fine as long as nudging could only ever happen
+while hovering, but keyboard nudging only requires the canvas to be
+*focused* (see above), not hovered: click the canvas, then move the mouse
+away without ever un-focusing it, and every arrow-key press after that
+left the magnifier showing stale, pre-nudge content under the old
+conditional. The magnifier's zoomed view is a crop of the frame pixels
+themselves, so *any* alignment change invalidates it regardless of mouse
+position — `nudgeAlign` now always calls `drawMagnifier(mx, my)` with
+`currentMagnifierLookNative()`'s result (the same tracked point the
+crosshair reads, see below), matching what every other alignment-changing
+action (drag, undo) already does.
 
 **A small crosshair on the main align canvas marks exactly where the
 magnifier loupe is currently zoomed into.** Without it there was no way to
@@ -241,7 +239,13 @@ legibility problem the orange, solid-filled crop handles already solve by
 not being a thin line — confirmed by screenshotting a real test photo and
 eyeballing it, not assumed; a small `#22d3ee` ring-plus-crosshair (still
 with a dark outline pass underneath, for the rare cyan-ish background) is
-what actually reads clearly.
+what actually reads clearly. **Suppressed entirely while actively
+hovering** (`drawMagnifierCrosshair` returns immediately if
+`lastHoverNative` is set) — the real mouse cursor already marks that exact
+point, so the crosshair would just be a redundant, slightly-offset
+duplicate sitting on top of it; it earns its keep only once the pointer's
+elsewhere (or never moved at all, e.g. right after a keyboard-only nudge)
+and nothing else on screen indicates where the loupe is looking.
 
 **The nudge pad (`#nudge-pad`, four buttons below the magnifier) is a
 touch-accessible equivalent of the arrow-key shortcut, not a separate
