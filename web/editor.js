@@ -383,13 +383,25 @@
     };
   }
 
+  // Set while the width textbox's own 'input' handler is applying what was
+  // just typed — see the listener below for why.
+  let editingScaleWidthInput = false;
+
   function updateOutputSizeLabel() {
     const { w, h } = computeOutputSize();
     outputSizeLabel.textContent = `Output size: ${w} × ${h} px`;
     // Keep the width textbox showing the actual current output width
-    // regardless of what last changed it — the scale slider, a crop
-    // resize, or the width box itself.
-    scaleWidthInput.value = w;
+    // whenever something ELSE changed it — the % slider, a crop resize —
+    // but NOT while the user is actively typing into it: this used to
+    // unconditionally overwrite it here too, which (since a typed width
+    // only maps to a whole-percent scale, then gets rounded back to
+    // pixels) rewrote whatever had just been typed on literally every
+    // keystroke — e.g. typing "1" immediately became "349" (1px rounds
+    // down to 0%, clamped up to the 10% minimum, 10% of a ~3488px-wide
+    // crop), making it impossible to type any further digits at all. The
+    // box now reformats to the precise resulting width only once editing
+    // finishes (on blur, see below), not on every keystroke.
+    if (!editingScaleWidthInput) scaleWidthInput.value = w;
   }
 
   // scalePercentForWidth/DEFAULT_OUTPUT_WIDTH: converts a desired output
@@ -1464,10 +1476,15 @@
     if (scaleWidthInput.value === '' || state.crop.w <= 0) return;
     const desiredWidth = Number(scaleWidthInput.value);
     if (!Number.isFinite(desiredWidth) || desiredWidth <= 0) return;
+    editingScaleWidthInput = true;
     applyScale(scalePercentForWidth(desiredWidth, state.crop.w));
+    editingScaleWidthInput = false;
   });
-  // Left empty/invalid: snap back to the actual current output width,
-  // same recovery behavior linkSliderWithNumber's pairs already have.
+  // Once editing finishes: snap to the actual resulting width, whether
+  // that's recovering from empty/invalid input (same behavior
+  // linkSliderWithNumber's pairs already have) or just reformatting a
+  // valid typed value to what it actually rounds to (e.g. "1080" ->
+  // "1075") now that typing no longer gets fought keystroke-by-keystroke.
   scaleWidthInput.addEventListener('blur', () => {
     scaleWidthInput.value = computeOutputSize().w;
   });
