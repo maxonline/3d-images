@@ -662,6 +662,33 @@ If you touch this code, verify with `npx playwright install webkit` and the
 `webkit` launcher, not just Chromium — this bug produced zero errors and
 looked completely fine there.
 
+**Sharpness (`state.adjust.sharpness`, the "Sharpness" slider) is a
+separate pass from `applyPixelAdjustments`, not another term in it — it
+genuinely needs neighboring pixels, unlike brightness/contrast/hue/grayscale/
+sepia, which are all pure per-pixel formulas with no neighbor access.**
+`applySharpen(imageData, amount)` runs a standard 5-point-Laplacian sharpen
+convolution — `center*(1+4k) - k*(sum of the 4 orthogonal neighbors)`,
+where `k` is `amount/100 * 2` — reading from a `Uint8ClampedArray` snapshot
+taken before writing any output pixels. That snapshot matters: convolving
+in place would let already-sharpened neighbor values leak into later
+pixels' kernels along each scanline, compounding the effect unevenly
+instead of applying it uniformly. Runs *before* `applyPixelAdjustments` in
+`applyDestAdjustmentsAndTint`, both inside the same single
+`getImageData`/`putImageData` round trip — sharpening the raw source first
+means brightness/contrast/hue then act on the sharpened result the same as
+they would on any other source, rather than amplifying edges that
+brightness/contrast already pushed around. Like every other adjustment
+here, it's manual pixel math for the same WebKit `ctx.filter` reason
+above — there's no native canvas "sharpen" filter to fall back to even on
+engines that do support `ctx.filter`, so this was always going to need
+hand-rolled pixel math regardless. Wired through the exact same
+`linkSliderWithNumber`/`applyBrightness`-style pattern as brightness/
+contrast/hue (`applySharpness`, reset to 0 in `load()` alongside the
+other three), and — because it lives in `applyDestAdjustmentsAndTint`,
+not a separate draw call — automatically applies everywhere brightness/
+contrast/hue already do: live preview, GIF/WebP/MP4 export, and both real
+and rigid-fallback interpolated frames, with zero extra call sites needed.
+
 **WebP export is fundamentally unavailable on WebKit, not just buggy.**
 `canvas.toBlob(..., 'image/webp')` silently returns a PNG blob instead of
 throwing there — no per-frame encode ever happens, and there's no client-side

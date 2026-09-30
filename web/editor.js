@@ -34,6 +34,8 @@
   const contrastValue = document.getElementById('contrast-value');
   const hueSlider = document.getElementById('hue-slider');
   const hueValue = document.getElementById('hue-value');
+  const sharpnessSlider = document.getElementById('sharpness-slider');
+  const sharpnessValue = document.getElementById('sharpness-value');
   const colorModeRadios = document.querySelectorAll('input[name="color-mode"]');
   const cropRatioRadios = document.querySelectorAll('input[name="crop-ratio"]');
 
@@ -169,7 +171,7 @@
     cropRatio: null, // locked width/height ratio, or null for free-form
     alignmentLocked: false, // when true, a plain drag moves the crop instead of aligning — no Space needed
     magnifierDefaultOverride: null, // native {x,y} set by clicking (not dragging) the canvas; null = frame 0's center
-    adjust: { brightness: 0, contrast: 0, hue: 0, colorMode: 'normal' },
+    adjust: { brightness: 0, contrast: 0, hue: 0, sharpness: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
 
@@ -456,6 +458,44 @@
     return v < 0 ? 0 : v > 255 ? 255 : v;
   }
 
+  // Unsharp-mask-style sharpening via a discrete 5-point Laplacian kernel —
+  // unlike brightness/contrast/hue below, this genuinely needs neighboring
+  // pixels, not just the pixel itself, so it's a separate pass over a full
+  // ImageData rather than another per-pixel term in applyPixelAdjustments.
+  // `center*(1+4k) - k*(sum of 4 neighbors)` is the standard sharpen
+  // convolution: at k=0 it's the identity, and as k grows it amplifies the
+  // difference between a pixel and its neighbors (i.e. edges) while leaving
+  // flat regions unchanged. Reads from a snapshot (`src`) taken before
+  // writing any results — an in-place convolution would otherwise let
+  // already-sharpened neighbor values leak into later pixels' kernels,
+  // compounding along each scanline instead of applying evenly.
+  function applySharpen(imageData, amount) {
+    if (amount <= 0) return;
+    const { width, height, data } = imageData;
+    if (width < 3 || height < 3) return; // no interior pixels to convolve
+    const src = new Uint8ClampedArray(data);
+    const k = (amount / 100) * 2; // slider 0..100 -> kernel strength 0..2
+
+    function at(x, y, c) {
+      const cx = x < 0 ? 0 : x >= width ? width - 1 : x;
+      const cy = y < 0 ? 0 : y >= height ? height - 1 : y;
+      return src[(cy * width + cx) * 4 + c];
+    }
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        for (let c = 0; c < 3; c++) {
+          const center = at(x, y, c);
+          const neighborSum = at(x - 1, y, c) + at(x + 1, y, c) + at(x, y - 1, c) + at(x, y + 1, c);
+          data[i + c] = clamp255(center * (1 + 4 * k) - k * neighborSum);
+        }
+        // alpha (data[i + 3]) is untouched — every frame here is opaque
+        // anyway, but there's no reason to touch it either way.
+      }
+    }
+  }
+
   // Applies brightness/contrast/hue-rotate/grayscale/sepia to an ImageData
   // in place, by hand — NOT via ctx.filter. WebKit (Safari, and therefore
   // every iOS browser regardless of name, since Apple requires them all to
@@ -545,11 +585,19 @@
   // are applied once to the final composited pixels, not per source layer.
   function applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, frameIndexForTint) {
     const needsPixelAdjust = state.adjust.brightness !== 0 || state.adjust.contrast !== 0 ||
-      state.adjust.hue !== 0 || state.adjust.colorMode === 'bw' || state.adjust.colorMode === 'sepia';
+      state.adjust.hue !== 0 || state.adjust.sharpness !== 0 ||
+      state.adjust.colorMode === 'bw' || state.adjust.colorMode === 'sepia';
     if (needsPixelAdjust) {
       const w = Math.max(1, Math.round(destW));
       const h = Math.max(1, Math.round(destH));
       const imageData = destCtx.getImageData(destX, destY, w, h);
+      // Sharpen first, on the untouched source pixels — brightness/contrast
+      // then run on the sharpened result, same as they would on any other
+      // source. Order doesn't matter much in practice, but sharpening AFTER
+      // e.g. a contrast push would amplify already-contrast-boosted edges
+      // rather than the original detail, so sharpen-first is the more
+      // predictable "sharpen what's actually there" behavior.
+      if (state.adjust.sharpness !== 0) applySharpen(imageData, state.adjust.sharpness);
       applyPixelAdjustments(imageData, state.adjust.brightness, state.adjust.contrast, state.adjust.hue, state.adjust.colorMode);
       destCtx.putImageData(imageData, destX, destY);
     }
@@ -1725,6 +1773,9 @@
   const applyHue = linkSliderWithNumber(hueSlider, hueValue, (v) => {
     state.adjust.hue = v;
   });
+  const applySharpness = linkSliderWithNumber(sharpnessSlider, sharpnessValue, (v) => {
+    state.adjust.sharpness = v;
+  });
   const applyScale = linkSliderWithNumber(scaleSlider, scaleValue, (v) => {
     state.outputScalePercent = v;
     updateOutputSizeLabel();
@@ -2324,6 +2375,7 @@
     applyBrightness(0);
     applyContrast(0);
     applyHue(0);
+    applySharpness(0);
     colorModeRadios.forEach((radio) => { radio.checked = radio.value === 'normal'; });
     state.adjust.colorMode = 'normal';
     cropRatioRadios.forEach((radio) => { radio.checked = radio.value === 'none'; });
