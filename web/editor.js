@@ -1330,12 +1330,7 @@
     recomputePreviewScale();
     applyScale(scalePercentForWidth(DEFAULT_OUTPUT_WIDTH, state.crop.w));
 
-    state.baseOrder = defaultOrder(frameCount());
-    orderInput.value = formatOrder(state.baseOrder);
-    state.order = orderForRendering(state.baseOrder, state.interpolationCount);
-    renderOrderSequenceStrip();
-    orderErrorEl.hidden = true;
-    orderValid = true;
+    resetOrderToDefault();
 
     updateColorModeAvailability();
     applyModeVisibility();
@@ -1439,11 +1434,13 @@
   });
   const applyInterpolation = linkSliderWithNumber(interpSlider, interpValue, (v) => {
     state.interpolationCount = v;
-    state.order = orderForRendering(state.baseOrder, v);
     updateColorModeAvailability();
     if (state.mode === 'ready') applyModeVisibility(); // order-section visibility depends on interpolationCount for 2-frame sets
-    renderOrderSequenceStrip();
-    scheduleInterpolationPrep();
+    // A different interpolation count means a different vocabulary (see
+    // frameVocabulary), so any custom-typed order's numbers would silently
+    // end up referring to different frames than the user chose them for —
+    // resetting to the new default avoids that silent reinterpretation.
+    resetOrderToDefault();
   });
   const applyBrightness = linkSliderWithNumber(brightnessSlider, brightnessValue, (v) => {
     state.adjust.brightness = v;
@@ -1523,9 +1520,6 @@
   // Expands a real (0-indexed) frame order into one with k interpolated
   // in-between frames inserted between each consecutive pair — e.g.
   // withInterpolation([0,1], 2) -> [0, {a:0,b:1,t:1/3}, {a:0,b:1,t:2/3}, 1].
-  // Only smooths transitions actually present in `order`; whether the
-  // implicit loop-back from the last entry to the first also needs
-  // smoothing is orderForRendering's job (below), not this function's.
   function withInterpolation(order, k) {
     if (k <= 0 || order.length < 2) return order.slice();
     const result = [order[0]];
@@ -1540,55 +1534,58 @@
     return result;
   }
 
-  // Appends the sequence's own first frame back onto its end, unless it's
-  // already there — turning e.g. [0,1] into [0,1,0], or the N-frame default
-  // pendulum [0,1,2,3,2,1] into [0,1,2,3,2,1,0]. A no-op when the order
-  // already ends where it started (nothing to close).
-  function closeLoopForInterpolation(order) {
-    if (order.length === 0 || order[order.length - 1] === order[0]) return order.slice();
-    return order.concat([order[0]]);
+  // The full addressable "vocabulary" the order textbox's numbers refer to:
+  // real frames in their natural order, each consecutive pair with k
+  // interpolated frames inserted between them — real AND interpolated
+  // frames alike each get their own plain consecutive integer, e.g. with 2
+  // real frames and k=1, "1,2" (real frames) becomes vocabulary "1,2,3"
+  // where 2 is the interpolated frame (matches what was asked: name
+  // interpolated frames as regular numbers, not a separate notation).
+  // Always the real frames in natural 0..N-1 order regardless of what the
+  // animation order itself is — the vocabulary is the fixed "address
+  // space" the order indexes into, not the order itself.
+  function frameVocabulary() {
+    return withInterpolation(range(0, frameCount()), state.interpolationCount);
   }
 
-  // What state.order actually gets set to: with interpolation off, the
-  // real order exactly as typed/defaulted, unchanged. With it on, the loop
-  // is closed first (see closeLoopForInterpolation) before expanding — so
-  // the animation is a genuine pendulum with NO hard cuts anywhere,
-  // including the wrap from the last frame back to the first, rather than
-  // just smoothing the transitions explicitly listed in baseOrder. This is
-  // requested/expected behavior specifically for interpolation — the
-  // non-interpolated default order (state.baseOrder, what the order
-  // textbox shows) is deliberately left alone; only ever closed here, for
-  // rendering.
+  // state.order is what actually gets drawn; state.baseOrder is the
+  // typed/default sequence of 0-indexed VOCABULARY positions (not
+  // necessarily real frame indices once interpolation is on) that
+  // resolves to it via this lookup.
+  function resolveOrder(baseOrder, vocabulary) {
+    return baseOrder.map((i) => vocabulary[i]);
+  }
+
+  // Resets the animation order to the default pendulum bounce over the
+  // CURRENT vocabulary (so it reflects whatever the interpolation count
+  // currently is) — used on first reaching ready mode, whenever the
+  // interpolation count changes (a different count means a different
+  // vocabulary, so any custom order's numbers would silently refer to
+  // different frames than the user chose them for — rather than
+  // reinterpreting them, or trying to translate them across vocabularies,
+  // just reset to a sane default and let the error-free starting point be
+  // obvious), and by the explicit "Reset to default" button.
   //
-  // state.order is played as a LOOP (GIF/WebP looping, or the preview's
-  // modulo cycling) — this was a real bug, caught after the fact, not just
-  // a theoretical concern: closing the loop makes the array start AND end
-  // on the exact same real frame, but that means the shared frame renders
-  // TWICE in a row right at the loop point (once as the array's last
-  // entry, again as its first when the next lap begins) — reported as
-  // "does two frames on last frame". Every OTHER transition in the array
-  // writes its real endpoint once and then something ELSE follows, so the
-  // fix is to drop just that one redundant trailing duplicate — the loop
-  // wrap already supplies that exact frame via the array's own first
-  // element, and the interpolated steps leading up to it are untouched, so
-  // the closing transition stays exactly as smooth as every other one.
-  function orderForRendering(baseOrder, k) {
-    if (k <= 0) return baseOrder.slice();
-    const expanded = withInterpolation(closeLoopForInterpolation(baseOrder), k);
-    if (expanded.length > 1 && expanded[expanded.length - 1] === baseOrder[0]) {
-      expanded.pop();
-    }
-    return expanded;
-  }
-
-  // Fractional position label for an interpolated entry — e.g. a=0 (frame
-  // "1"), b=1 (frame "2"), t=0.5 -> "1.5". Lets the sequence strip below
-  // show where each synthesized frame sits between its two real neighbors,
-  // consistent with the real frames' plain integer labels either side of it.
-  function formatInterpLabel(entry) {
-    const labelA = entry.a + 1;
-    const labelB = entry.b + 1;
-    return (labelA + entry.t * (labelB - labelA)).toFixed(1);
+  // Because the vocabulary already interleaves interpolated frames with
+  // real ones, defaultOrder's plain pendulum formula (which knows nothing
+  // about interpolation) naturally produces a fully-smoothed pendulum with
+  // no extra logic needed — and, unlike an earlier version of this feature
+  // that only smoothed transitions explicitly listed in a real-frame-only
+  // order, it doesn't need any special-case fix-up for the loop-back point
+  // either: defaultOrder(vocabLength) always ends one element short of the
+  // vocabulary's own first entry (its backward segment stops at index 1,
+  // never back down to index 0), so wrapping from the last frame back to
+  // the first for looped playback was never a duplicate to begin with here.
+  function resetOrderToDefault() {
+    const vocabulary = frameVocabulary();
+    state.baseOrder = defaultOrder(vocabulary.length);
+    orderInput.value = formatOrder(state.baseOrder);
+    orderErrorEl.hidden = true;
+    orderValid = true;
+    state.order = resolveOrder(state.baseOrder, vocabulary);
+    renderOrderSequenceStrip();
+    updateGenerateButtonsDisabled();
+    scheduleInterpolationPrep();
   }
 
   // Visual strip showing every entry currently in state.order — real
@@ -1605,13 +1602,13 @@
   // strip without fighting over which container a single DOM node lives in.
   function renderOrderSequenceStrip() {
     orderSequenceStripEl.innerHTML = '';
-    state.order.forEach((entry) => {
+    state.order.forEach((entry, i) => {
       // Defensive: state.order can transiently reference a just-replaced
       // frame set (e.g. applyInterpolation(0)'s reset-on-load runs before
       // load() has rebuilt state.order for the new frames) — skip rather
       // than throw on a stale index.
       const frameIndices = typeof entry === 'number' ? [entry] : [entry.a, entry.b];
-      if (frameIndices.some((i) => !state.frames[i])) return;
+      if (frameIndices.some((fi) => !state.frames[fi])) return;
 
       const wrap = document.createElement('div');
       wrap.className = 'seq-thumb';
@@ -1620,14 +1617,12 @@
       mediaWrap.className = 'seq-thumb-media-wrap';
       wrap.appendChild(mediaWrap);
 
-      let label;
       if (typeof entry === 'number') {
         const img = document.createElement('img');
         img.className = 'seq-thumb-media';
         img.src = state.frames[entry].img.src;
         img.alt = `Frame ${entry + 1}`;
         mediaWrap.appendChild(img);
-        label = String(entry + 1);
       } else {
         const cached = interpFrameCache.get(`${entry.a}-${entry.b}-${entry.t}`);
         if (cached) {
@@ -1641,12 +1636,15 @@
         badge.className = 'seq-thumb-badge';
         badge.textContent = 'Interpolated';
         mediaWrap.appendChild(badge);
-        label = formatInterpLabel(entry);
       }
 
+      // The label is the entry's plain vocabulary position (state.baseOrder[i] + 1),
+      // not anything derived from the entry's own content — real and
+      // interpolated frames share the exact same consecutive numbering,
+      // per frameVocabulary() above.
       const labelEl = document.createElement('span');
       labelEl.className = 'seq-thumb-label';
-      labelEl.textContent = label;
+      labelEl.textContent = String(state.baseOrder[i] + 1);
       wrap.appendChild(labelEl);
 
       orderSequenceStripEl.appendChild(wrap);
@@ -1671,19 +1669,22 @@
   }
 
   orderInput.addEventListener('input', () => {
-    const result = parseOrder(orderInput.value, frameCount());
+    const vocabulary = frameVocabulary();
+    const result = parseOrder(orderInput.value, vocabulary.length);
     orderValid = !result.error;
     orderErrorEl.hidden = orderValid;
     if (result.error) {
       orderErrorEl.textContent = result.error;
     } else {
       state.baseOrder = result.order;
-      state.order = orderForRendering(state.baseOrder, state.interpolationCount);
+      state.order = resolveOrder(state.baseOrder, vocabulary);
       renderOrderSequenceStrip();
       scheduleInterpolationPrep();
     }
     updateGenerateButtonsDisabled();
   });
+
+  document.getElementById('order-reset-btn').addEventListener('click', resetOrderToDefault);
 
   function updateGenerateButtonsDisabled() {
     generateGifBtn.disabled = !orderValid;

@@ -201,15 +201,18 @@ re-run that scenario, not just the "click 1, 2, 3 in order" happy path.
 
 **Animation order (`state.order`/`state.baseOrder`, `#order-section`).** A
 validated, comma-separated 1-indexed text field (`#order-input`,
-`parseOrder`/`formatOrder`) drives `state.baseOrder`, the *real* frame
-sequence; `defaultOrder(n)` produces a pendulum bounce (`[0..n-1, n-2..1]`,
-which is `[0,1]` — i.e. today's old plain alternation — when `n===2`, and
-`[0,1,2,3,2,1]` → displayed as `"1,2,3,4,3,2"` when `n===4`). `generateGif`/
-`generateWebp`/`generateMp4`/the live preview loop all loop over
-`state.order` (== `orderForRendering(state.baseOrder, state.interpolationCount)`,
-see below) calling `drawOrderEntry(ctx, entry, ...)` once per entry, instead
-of the old two fixed calls. `buildAnimatedWebp` needed zero changes to
-support any of this — it already accepted an arbitrary-length frame array.
+`parseOrder`/`formatOrder`) drives `state.baseOrder` — 0-indexed positions
+into the current *vocabulary* (see below; just real frame indices when
+interpolation is off, which is all `defaultOrder`/`parseOrder` have ever
+known or needed to know about); `defaultOrder(n)` produces a pendulum
+bounce (`[0..n-1, n-2..1]`, which is `[0,1]` — i.e. today's old plain
+alternation — when `n===2`, and `[0,1,2,3,2,1]` → displayed as
+`"1,2,3,4,3,2"` when `n===4`). `generateGif`/`generateWebp`/`generateMp4`/
+the live preview loop all loop over `state.order` (==
+`resolveOrder(state.baseOrder, frameVocabulary())`, see below) calling
+`drawOrderEntry(ctx, entry, ...)` once per entry, instead of the old two
+fixed calls. `buildAnimatedWebp` needed zero changes to support any of
+this — it already accepted an arbitrary-length frame array.
 `#order-section` itself is shown whenever `frameCount() > 2` (as before) OR
 `state.interpolationCount > 0` (new) — a 2-frame set has nothing worth
 customizing about its order until interpolation makes the sequence longer
@@ -226,10 +229,12 @@ repeated transition (not uncommon in a pendulum) would silently yank it out
 of an earlier thumbnail. Interpolated thumbnails get an always-visible
 "Interpolated" badge (unconditional — unlike the alignment strip's
 `.thumb-badge`, which is gated on a `.confirmed` class that doesn't apply
-here) and a fractional label (`formatInterpLabel`: linearly interpolate the
-two neighboring frames' integer labels by `t`, e.g. `a=0,b=1,t=0.5` → `"1.5"`)
-so its position in the sequence relative to its real neighbors is obvious at
-a glance. Re-rendered on every `state.order` reassignment (so it always
+here). Every thumbnail's number label is simply `state.baseOrder[i] + 1` —
+the entry's own vocabulary position (see below), the exact same consecutive
+numbering the order textbox uses, not something derived from the entry's
+content — so a real frame and the interpolated frame right after it are
+labeled with plain consecutive integers like any other pair, matching what
+you'd type. Re-rendered on every `state.order` reassignment (so it always
 matches what would actually export) and again once
 `scheduleInterpolationPrep`'s background pass finishes, so interpolated
 thumbnails upgrade from an empty placeholder box to the real blended content
@@ -246,48 +251,68 @@ per-entry guard.)
 
 **Interpolated (tweened) frames — real optical flow (OpenCV.js), with a
 rigid shift+crossfade fallback.** The "Interpolated frames" slider
-(`state.interpolationCount`, 0–10, any frame count) inserts `k` synthesized
-in-between frames between every consecutive pair via `withInterpolation(order, k)`,
+(`state.interpolationCount`, 0–10, any frame count) controls `k`,
+synthesized in-between frames inserted between every consecutive pair of
+real frames — `withInterpolation(order, k)` does the actual insertion,
 producing entries of the form `{a, b, t}` (`t` strictly in `(0,1)`)
 interleaved with the existing plain frame-index numbers.
 
-**Turning interpolation on automatically closes the loop into a full
-pendulum — this was a deliberate follow-up request, not the original
-design.** `state.baseOrder` (what the order textbox shows, and what
-`state.order` is when `state.interpolationCount === 0`) is left exactly
-as-is — still just `defaultOrder(n)` or whatever was typed, with the same
-implicit hard-cut wrap from its last entry back to its first that's always
-existed. But whenever interpolation is actually on, `orderForRendering(baseOrder, k)`
-— not `withInterpolation` directly — is what actually gets assigned to
-`state.order`: it first runs `closeLoopForInterpolation`, which appends
-`baseOrder`'s own first frame back onto its end (unless it's already
-there), THEN expands via `withInterpolation`. So `[0,1]` (the 2-frame
-default) becomes `[0,1,0]` before expanding — turning what used to be a
-hard flip-flop into a real pendulum with both the forward AND return legs
-smoothed — and `[0,1,2,3,2,1]` (the N=4 default, already pendulum-shaped
-for its *interior*) becomes `[0,1,2,3,2,1,0]`, additionally smoothing its
-own closing cut. `closeLoopForInterpolation` is a no-op when the order
-already closes itself (rare, but possible with a hand-typed custom order
-ending back at its own first frame) to avoid computing a pointless
-self-to-self flow pair.
+**The animation-order textbox addresses interpolated frames as plain
+consecutive numbers, not a separate notation — this needed a real
+rearchitecture, not just a formatting change, and replaced an earlier
+version of this feature that auto-inserted interpolation invisibly.**
+`frameVocabulary()` (`withInterpolation(range(0, frameCount()), k)`, i.e.
+real frames in their natural 0..N-1 order with `k` interpolated frames
+spliced between each pair) is the fixed "address space" the order textbox's
+numbers index into: for 2 real frames and `k=1`, "1,2" (the real frames)
+becomes vocabulary "1,2,3", where 2 *is* the interpolated frame — matching
+exactly what was asked. `state.baseOrder` changed meaning to match: it's no
+longer "real frame indices," it's 0-indexed *vocabulary positions*, and
+`state.order` is `resolveOrder(state.baseOrder, frameVocabulary())` —
+`state.baseOrder.map(i => vocabulary[i])` — looking each one up to get the
+real-number-or-`{a,b,t}` entry `drawOrderEntry` actually knows how to draw.
+`parseOrder`/`formatOrder` themselves are unchanged; only what `n` and the
+indices they produce/consume *mean* changed — they now operate against
+`frameVocabulary().length`, not `frameCount()`.
 
-**`orderForRendering` then drops the closing transition's own trailing
-real-frame entry — this was a real bug, caught from a user report, not a
-style choice.** `state.order` is played as a *loop* (GIF/WebP looping, the
-preview's modulo cycling) — closing it so the array starts and ends on the
-same real frame sounds like it'd make that loop seamless, but actually
-makes it worse: that shared frame renders TWICE in a row right at the loop
-point, once as the array's last entry and again as its first when the next
-lap begins (reported as "does two frames on last frame"). Every OTHER
-transition in the array writes its real endpoint once and then something
-ELSE follows; only the closing one is followed by nothing (the array just
-ends), so `orderForRendering` pops that one redundant trailing entry after
-expanding — `[0, i.., 1, i.., 0]` becomes `[0, i.., 1, i..]`, ending on the
-interpolated approach toward frame 0 rather than on frame 0 itself, since
-the loop wrap already supplies that exact frame via the array's own first
-element. The interpolated steps leading into it are untouched, so the
-closing transition stays exactly as smooth as every other one — frame 0
-now appears exactly once per lap instead of twice. `drawOrderEntry` is the
+Because the vocabulary already interleaves interpolated frames with real
+ones, `defaultOrder`'s plain pendulum formula — which knows nothing about
+interpolation, never modified — naturally produces a fully-smoothed
+pendulum with zero extra logic: `defaultOrder(vocabulary.length)` for 2
+real frames + `k=1` (vocab length 3) is `[0,1,2,1]`, i.e. real1 →
+interpolated → real2 → interpolated again (the *same* interpolated frame,
+reused for the return leg exactly like real frames already were reused in
+the old N>2 pendulum — a symmetric blend has no inherent "direction" to get
+wrong). **This sidesteps a real, previously-fixed bug for free — worth
+knowing precisely because the earlier fix (`closeLoopForInterpolation` +
+popping a redundant trailing entry) is GONE, not superseded by something
+equivalent**: with the old "auto-insert invisibly" design,
+`state.baseOrder` was real-frame-only and closing the loop for a smooth
+return leg meant literally appending `baseOrder[0]` back onto the end,
+which made the array start and end on the exact same frame — looked right
+in isolation, but since `state.order` is played as a *loop*, that shared
+frame rendered TWICE in a row right at the wrap point (reported as "does
+two frames on last frame"), needing an explicit pop of the redundant
+trailing entry to fix. In the vocabulary model, `defaultOrder`'s backward
+segment already stops one element short of vocabulary index 0 (by
+construction — same formula as always), so the last entry is never equal
+to the first and looped playback was never a duplicate to begin with. If
+you touch either function, that invariant (`defaultOrder(n)`'s last element
+`!== ` its first, for `n > 1`) is what to preserve.
+
+**Changing the interpolation count resets the order to the new default
+rather than trying to reinterpret a custom typed order against the new
+vocabulary.** A different `k` means a different vocabulary — the SAME
+typed number can refer to a completely different frame before vs. after
+(e.g. "3" is real-frame-2 at `k=1` for a 2-frame set, but an interpolated
+frame at `k=2`) — translating a custom order's meaning across that shift
+isn't generally well-defined, so `resetOrderToDefault()` (used here, on
+first reaching ready mode, and by the explicit "Reset to default" button —
+one shared function, three call sites) just resets to
+`defaultOrder(newVocabulary.length)` and lets the reset be obvious rather
+than silently reinterpreting numbers the user didn't intend.
+
+`drawOrderEntry` is the
 single dispatcher every consumer of `state.order` goes through: a plain
 number still means "draw this real frame" exactly as before (so
 `state.interpolationCount === 0`, the default, is byte-for-byte identical

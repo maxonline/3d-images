@@ -115,8 +115,11 @@
       <div id="order-section" hidden>
         <h2>Animation order</h2>
         <div class="seq-strip" id="order-sequence-strip"></div>
-        <p class="hint">Comma-separated frame numbers (1&ndash;N), e.g. "1,2,3,4,3,2". Defaults to a pendulum bounce.</p>
+        <p class="hint">Comma-separated frame numbers (1&ndash;N) &mdash; when "Interpolated frames" is on, interpolated frames get their own numbers too, interleaved with the real frames, e.g. with 1 interpolated frame "1,2" becomes "1,2,3" (2 is the interpolated frame). Defaults to a pendulum bounce.</p>
         <input type="text" id="order-input" class="order-input">
+        <div class="control-row-buttons">
+          <button id="order-reset-btn" type="button" class="secondary-btn">Reset to default</button>
+        </div>
         <p class="hint error-hint" id="order-error" hidden></p>
       </div>
 
