@@ -416,6 +416,28 @@ h1 {
   cursor: pointer;
 }
 
+.fill-color-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  margin-left: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.fill-color-row input[type="color"] {
+  width: 2.5rem;
+  height: 1.75rem;
+  /* A little padding insets the swatch inside the control's own chrome, so
+     the default black still reads as a deliberate swatch rather than
+     disappearing into the (also black) page background. */
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--border);
+  cursor: pointer;
+}
+
 .nudge-pad {
   display: grid;
   grid-template-columns: repeat(3, 2.2rem);

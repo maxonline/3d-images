@@ -40,7 +40,7 @@
 
   <section id="editor" hidden>
     <h2>Align &amp; crop</h2>
-    <p class="hint" id="align-hint">Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Hold Space while dragging to move the crop instead of aligning. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.</p>
+    <p class="hint" id="align-hint">Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Hold Space while dragging to move the crop instead of aligning. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline unless &ldquo;Allow crop outside photos&rdquo; is on. Hover for a zoomed-in view.</p>
     <button type="button" id="undo-btn" class="secondary-btn" disabled>Undo last drag</button>
 
     <section id="frame-thumb-section" hidden>
@@ -65,6 +65,15 @@
         <input type="checkbox" id="lock-alignment-checkbox">
         Lock alignment (drag moves crop instead)
       </label>
+      <label class="lock-align-label">
+        <input type="checkbox" id="allow-crop-outside-checkbox">
+        Allow crop outside photos
+      </label>
+      <div class="fill-color-row" id="fill-color-row" hidden>
+        <label for="fill-color-input">Fill color</label>
+        <input type="color" id="fill-color-input" value="#000000">
+        <span class="hint-inline">used wherever the crop extends past the photos</span>
+      </div>
     </section>
 
     <div class="align-row">

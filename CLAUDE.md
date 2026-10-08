@@ -262,12 +262,59 @@ all four to match, called from the lock checkbox's `change` handler and from
 `load`/`reset` (so a fresh upload always starts with them enabled, same as
 the checkbox itself starting unchecked).
 
-**The crop rectangle is always clamped inside the overlap.** `state.crop`
-must stay within `currentOverlapRect()` — enforced by
+**The crop rectangle is clamped inside `cropBoundsRect()` — normally the
+overlap, but the whole canvas when "Allow crop outside photos" is on.**
+`state.crop` is kept within whatever that one function returns, enforced by
 `clampCropToOverlap`/`clampResizeCrop` after every alignment or crop change.
 `clampAlign` also prevents the overlap itself from shrinking below 30% of
 the frame in either axis (checked pairwise against the fixed anchor frame,
 not the live N-way intersection — an accepted simplification).
+
+**"Allow crop outside photos" (`state.allowCropOutside` + `state.fillColor`,
+the checkbox and color picker in `#crop-ratio-section`) is a one-line change
+to where the crop may live, not a parallel crop mode.** Every clamp already
+funnelled through a single "what rect must the crop stay inside" lookup, so
+the whole feature is `cropBoundsRect()` returning either
+`currentOverlapRect()` (off, the original behavior) or the frame bounds
+grown by `ALIGN_MARGIN_NATIVE` on all four sides (on). That second rect is
+deliberately *exactly* the region the align canvas already draws — the
+canvas has always been `state.W/H + ALIGN_MARGIN_NATIVE * 2` (200px per
+side, long predating this feature, originally so alignment drags couldn't
+push a frame off-canvas) — so the crop can be dragged anywhere actually
+visible and never somewhere off-screen it couldn't be grabbed back from.
+`currentOverlapRect()` itself is unchanged and still drives the green
+dashed outline, which keeps meaning "fully-covered area" — more useful than
+ever once the crop may leave it. Toggling the checkbox off just re-runs
+`clampCropToOverlap()` against the now-smaller bounds, which is already
+exactly "pull an out-of-bounds crop back in" — no separate restore path.
+
+**Filling outside-the-photo areas can NOT rely on `drawImage`'s own source
+clipping — Chromium and WebKit genuinely disagree, and this was a real bug
+caught by a cross-engine test, not a hypothetical.** The spec says a source
+rect extending past the image is clipped with the destination clipped
+*proportionally*; Chromium does that, but WebKit instead **stretches** the
+clipped source to fill the entire destination — so the photo silently
+scaled up to cover the whole frame and the fill was never visible on
+WebKit, while Chromium looked perfect. `drawImageClipped` therefore
+computes the source∩image intersection and the matching destination
+sub-rectangle by hand, which is engine-independent. `drawFrameRaw` keeps a
+fast path (a single plain `drawImage`, byte-identical to before) whenever
+the source rect is fully inside the image — always true unless this option
+is on — so the default path gained no new float math that could perturb
+existing output. **A first probe of this behavior was misleading and nearly
+shipped the bug**: it used a source rect overhanging on all four sides,
+which both engines handle identically; only a one- or two-sided overhang
+diverges. If you re-probe this, overhang on exactly one side.
+
+The fill itself is painted in `drawOrderEntry` — the single dispatcher every
+preview and export path already goes through — so it covers real frames,
+cached optical-flow frames, and the rigid fallback with one `fillRect`, and
+is skipped entirely while the option is off (every pixel is guaranteed
+covered then, so filling would be wasted work on every preview frame).
+`drawCroppedFrameToCanvas` fills too, which matters more than it looks:
+that canvas is what optical flow is computed *from*, and transparent pixels
+outside the frame would otherwise feed garbage into the flow field at the
+crop's edges.
 
 **Crop aspect-ratio lock (`state.cropRatio`, the "Crop aspect ratio" radio
 group) reuses the same clamp functions rather than being a separate code

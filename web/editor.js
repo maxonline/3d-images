@@ -21,6 +21,9 @@
 
   const cropRatioSectionEl = document.getElementById('crop-ratio-section');
   const lockAlignmentCheckbox = document.getElementById('lock-alignment-checkbox');
+  const allowCropOutsideCheckbox = document.getElementById('allow-crop-outside-checkbox');
+  const fillColorRow = document.getElementById('fill-color-row');
+  const fillColorInput = document.getElementById('fill-color-input');
   const cropExportPanelEl = document.getElementById('crop-export-panel');
 
   const orderSectionEl = document.getElementById('order-section');
@@ -170,6 +173,8 @@
     crop: { x: 0, y: 0, w: 0, h: 0 },
     cropRatio: null, // locked width/height ratio, or null for free-form
     alignmentLocked: false, // when true, a plain drag moves the crop instead of aligning — no Space needed
+    allowCropOutside: false, // when true the crop may extend past the photos, into the canvas margin
+    fillColor: '#000000', // painted wherever an allowCropOutside crop extends past the photos
     magnifierDefaultOverride: null, // native {x,y} set by clicking (not dragging) the canvas; null = frame 0's center
     adjust: { brightness: 0, contrast: 0, hue: 0, sharpness: 0, colorMode: 'normal' },
     fps: 8,
@@ -276,6 +281,28 @@
     return computeOverlapRectN(currentOverlapFrames(), state.W, state.H);
   }
 
+  // The rect the crop is clamped inside — the ONE place that choice is made,
+  // so "allow crop outside photos" needed no new branch in any individual
+  // clamp function. Normally that's the frames' overlap (every output pixel
+  // comes from real image data in every frame). With state.allowCropOutside
+  // on it's the whole align canvas instead — exactly the frame bounds grown
+  // by ALIGN_MARGIN_NATIVE on all four sides, i.e. precisely the region the
+  // canvas already draws (see recomputeAlignScale), so the crop can be
+  // dragged anywhere actually visible and never somewhere off-screen that
+  // can't be seen or grabbed back. Pixels inside the crop but outside a
+  // given frame get state.fillColor at draw time (see drawOrderEntry).
+  // currentOverlapRect() itself stays the real overlap regardless — the
+  // green dashed outline keeps meaning "fully-covered area," which is more
+  // useful than ever once the crop is allowed to leave it.
+  function cropBoundsRect() {
+    if (!state.allowCropOutside) return currentOverlapRect();
+    const x0 = -ALIGN_MARGIN_NATIVE;
+    const y0 = -ALIGN_MARGIN_NATIVE;
+    const x1 = state.W + ALIGN_MARGIN_NATIVE;
+    const y1 = state.H + ALIGN_MARGIN_NATIVE;
+    return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
+  }
+
   function clampAlign(dx, dy, W, H) {
     const maxDx = W * (1 - MIN_OVERLAP_FRACTION);
     const maxDy = H * (1 - MIN_OVERLAP_FRACTION);
@@ -286,7 +313,7 @@
   }
 
   function resetCropToOverlap() {
-    const ov = currentOverlapRect();
+    const ov = cropBoundsRect();
     state.crop = state.cropRatio
       ? fitCropToRatio({ x: ov.x0, y: ov.y0, w: ov.w, h: ov.h }, state.cropRatio, ov)
       : { x: ov.x0, y: ov.y0, w: ov.w, h: ov.h };
@@ -317,7 +344,7 @@
   }
 
   function clampCropToOverlap() {
-    const ov = currentOverlapRect();
+    const ov = cropBoundsRect();
     if (state.cropRatio) {
       state.crop = fitCropToRatio(state.crop, state.cropRatio, ov);
       return;
@@ -331,7 +358,7 @@
   }
 
   function clampResizeCrop(startCrop, handle, dx, dy, ratio) {
-    const ov = currentOverlapRect();
+    const ov = cropBoundsRect();
     const right = startCrop.x + startCrop.w;
     const bottom = startCrop.y + startCrop.h;
 
@@ -570,12 +597,53 @@
   // how drawInterpolatedFrame below synthesizes an in-between frame: both
   // contributing frames get drawn through the SAME offset override, so they
   // land in registration with each other for the blend.
+  // Draws `img`'s (sx,sy,sw,sh) region into (destX,destY,destW,destH),
+  // clipping the source to the image's real bounds ourselves and shrinking
+  // the destination by the same proportion, so out-of-bounds parts of the
+  // source simply aren't painted (leaving whatever is underneath — the fill
+  // color, for an allow-crop-outside crop).
+  //
+  // Doing this by hand rather than letting drawImage handle it is REQUIRED,
+  // not defensive: engines disagree. The spec says a source rect extending
+  // past the image should be clipped with the destination clipped
+  // proportionally, and Chromium does exactly that — but WebKit instead
+  // STRETCHES the clipped source to fill the whole destination, so the
+  // photo silently scaled up to cover the entire frame and no fill was ever
+  // visible there. Confirmed with a standalone two-engine probe: source
+  // (-133,-100,773,580) from a 640x480 image into a 640x480 destination
+  // gives a transparent/filled top-left corner on Chromium and photo pixels
+  // on WebKit. (An earlier probe missed this because it happened to use a
+  // source rect overhanging on all four sides, which both engines handle
+  // alike — only a one-or-two-sided overhang diverges.)
+  function drawImageClipped(destCtx, img, imgW, imgH, sx, sy, sw, sh, destX, destY, destW, destH) {
+    const cx0 = Math.max(sx, 0);
+    const cy0 = Math.max(sy, 0);
+    const cx1 = Math.min(sx + sw, imgW);
+    const cy1 = Math.min(sy + sh, imgH);
+    if (cx1 <= cx0 || cy1 <= cy0) return; // crop entirely off this frame
+    // Map the clipped source span back onto the destination proportionally.
+    const dx0 = destX + ((cx0 - sx) / sw) * destW;
+    const dy0 = destY + ((cy0 - sy) / sh) * destH;
+    const dw = ((cx1 - cx0) / sw) * destW;
+    const dh = ((cy1 - cy0) / sh) * destH;
+    destCtx.drawImage(img, cx0, cy0, cx1 - cx0, cy1 - cy0, dx0, dy0, dw, dh);
+  }
+
   function drawFrameRaw(destCtx, frameIndex, destX, destY, destW, destH, offsetOverride, alpha) {
     const f = state.frames[frameIndex];
     const { sx, sy, sw, sh } = sourceRectFor(frameIndex, state.crop, offsetOverride);
     destCtx.save();
     if (alpha != null) destCtx.globalAlpha = alpha;
-    destCtx.drawImage(f.img, sx, sy, sw, sh, destX, destY, destW, destH);
+    // Fast path when the source rect is entirely inside the image — which is
+    // always true unless allowCropOutside is on. Kept as a separate branch so
+    // the overwhelmingly common case stays the exact same single drawImage
+    // call it has always been, with no new float math that could perturb
+    // existing output by a sub-pixel.
+    if (sx >= 0 && sy >= 0 && sx + sw <= state.W && sy + sh <= state.H) {
+      destCtx.drawImage(f.img, sx, sy, sw, sh, destX, destY, destW, destH);
+    } else {
+      drawImageClipped(destCtx, f.img, state.W, state.H, sx, sy, sw, sh, destX, destY, destW, destH);
+    }
     destCtx.restore();
   }
 
@@ -761,7 +829,20 @@
     const c = document.createElement('canvas');
     c.width = w;
     c.height = h;
-    c.getContext('2d').drawImage(f.img, sx, sy, sw, sh, 0, 0, w, h);
+    const ctx = c.getContext('2d');
+    // Same fill-underneath as drawOrderEntry, for the same reason — but it
+    // matters more here: this canvas is what optical flow is computed FROM,
+    // and transparent (0,0,0,0) pixels outside the frame would otherwise
+    // feed garbage into the flow field at the crop's edges. Filling gives
+    // flow a flat, consistent region there instead.
+    if (state.allowCropOutside) {
+      ctx.fillStyle = state.fillColor;
+      ctx.fillRect(0, 0, w, h);
+      // Same engine-divergence reason as drawFrameRaw — see drawImageClipped.
+      drawImageClipped(ctx, f.img, state.W, state.H, sx, sy, sw, sh, 0, 0, w, h);
+    } else {
+      ctx.drawImage(f.img, sx, sy, sw, sh, 0, 0, w, h);
+    }
     return c;
   }
 
@@ -942,6 +1023,25 @@
   // instant rigid-shift fallback while the real one is still being
   // prepared in the background.
   function drawOrderEntry(destCtx, entry, destX, destY, destW, destH) {
+    // Paint the fill color under everything first, so any part of the crop
+    // that falls outside a frame shows it instead of staying transparent.
+    // Canvas drawImage with a partly-out-of-bounds SOURCE rect clips the
+    // source to the image and the destination proportionally — the frame
+    // still lands in the geometrically right place, the uncovered margin
+    // just isn't painted at all (verified identical on Chromium and
+    // WebKit) — so a plain fill underneath is all that's needed; no
+    // per-edge letterbox math. Done here in the one dispatcher rather than
+    // in each draw path so it covers real frames, cached optical-flow
+    // frames, and the rigid fallback alike. Only when the crop can
+    // actually leave the overlap: with allowCropOutside off, every pixel
+    // is guaranteed covered, so filling would be wasted work on every
+    // preview frame.
+    if (state.allowCropOutside) {
+      destCtx.save();
+      destCtx.fillStyle = state.fillColor;
+      destCtx.fillRect(destX, destY, destW, destH);
+      destCtx.restore();
+    }
     if (typeof entry === 'number') {
       drawAdjustedFrame(destCtx, entry, destX, destY, destW, destH);
       return;
@@ -1570,7 +1670,7 @@
   function updateAlignHint() {
     alignHintEl.textContent = frameCount() > 2
       ? 'Click a frame below to select it, then drag it (or use arrow keys, 1px per press) onto the ghosted average of every frame already aligned. Hold Space while dragging to move the crop instead. Every frame needs a click before you can crop. Drag an orange corner handle to resize the crop once it appears. Hover for a zoomed-in view.'
-      : "Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Hold Space while dragging to move the crop instead of aligning. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline. Hover for a zoomed-in view.";
+      : "Drag anywhere (or use arrow keys, 1px per press) to align the ghosted frame on a shared point, e.g. a face. Hold Space while dragging to move the crop instead of aligning. Drag an orange corner handle to resize the crop — it's kept inside the green overlap outline unless “Allow crop outside photos” is on. Hover for a zoomed-in view.";
   }
 
   function renderThumbnailStrip() {
@@ -1818,7 +1918,7 @@
       if (!radio.checked) return;
       state.cropRatio = CROP_RATIOS[radio.value];
       if (state.cropRatio) {
-        const ov = currentOverlapRect();
+        const ov = cropBoundsRect();
         state.crop = fitCropToRatio(state.crop, state.cropRatio, ov);
       }
       recomputePreviewScale();
@@ -1849,6 +1949,41 @@
       alignCanvas.style.cursor = 'grab';
     }
     updateNudgeButtonsAvailability();
+  });
+
+  // The fill-color picker is only meaningful while the crop is allowed to
+  // leave the photos — there's nothing to fill otherwise — so it's revealed
+  // and hidden alongside the checkbox rather than sitting there permanently
+  // doing nothing.
+  function updateFillColorVisibility() {
+    fillColorRow.hidden = !state.allowCropOutside;
+  }
+
+  allowCropOutsideCheckbox.addEventListener('change', () => {
+    state.allowCropOutside = allowCropOutsideCheckbox.checked;
+    updateFillColorVisibility();
+    // Re-clamp through the (now different) bounds either way. Turning it ON
+    // changes nothing immediately — the current crop is already inside the
+    // overlap, which is a subset of the larger bounds — but turning it OFF
+    // genuinely has to pull an outside-the-photos crop back in, which is
+    // exactly what clampCropToOverlap already does against whatever
+    // cropBoundsRect() now returns. No separate "shrink it back" path.
+    if (state.mode === 'ready') {
+      clampCropToOverlap();
+      recomputePreviewScale();
+      updateOutputSizeLabel();
+    }
+    clearInterpolationCaches();
+    scheduleInterpolationPrep();
+    drawAlignmentCanvas();
+  });
+
+  fillColorInput.addEventListener('input', () => {
+    state.fillColor = fillColorInput.value;
+    // Interpolated frames bake the fill in (drawCroppedFrameToCanvas), so
+    // anything already cached was computed against the old color.
+    clearInterpolationCaches();
+    scheduleInterpolationPrep();
   });
 
   // Anaglyph tint is inherently a 2-view concept — disable it once there are
@@ -2386,6 +2521,11 @@
     state.cropRatio = null;
     lockAlignmentCheckbox.checked = false;
     state.alignmentLocked = false;
+    allowCropOutsideCheckbox.checked = false;
+    state.allowCropOutside = false;
+    fillColorInput.value = '#000000';
+    state.fillColor = '#000000';
+    updateFillColorVisibility();
     state.magnifierDefaultOverride = null;
     undoSnapshot = null;
     undoBtn.disabled = true;
@@ -2431,6 +2571,11 @@
     state.alignmentLocked = false;
     lockAlignmentCheckbox.checked = false;
     updateNudgeButtonsAvailability();
+    state.allowCropOutside = false;
+    allowCropOutsideCheckbox.checked = false;
+    state.fillColor = '#000000';
+    fillColorInput.value = '#000000';
+    updateFillColorVisibility();
     state.magnifierDefaultOverride = null;
     undoSnapshot = null;
     undoBtn.disabled = true;
