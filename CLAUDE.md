@@ -926,6 +926,14 @@ context to `colorScheme: 'light'` and confirming the page still renders
 fully black/white regardless — proof it's truly unconditional, not
 accidentally still gated on the media query.
 
+**Link previews.** `index.html` carries Open Graph + Twitter-card meta tags
+pointing at `web/og-image.png` (1200×630, absolute URL on
+`wiggle.maxonline.se` — crawlers don't resolve relative `og:image`). The PNG
+is rendered from `og/og-image.html` (outside `web/`, so not deployed) by
+screenshotting it at exactly 1200×630 with Playwright; edit the HTML and
+re-render rather than editing the PNG. If the domain changes, update
+`og:url`/`og:image`/`twitter:image` too.
+
 ## Testing
 
 There's no test suite and no sample images kept in the repo (the original
