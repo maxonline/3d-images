@@ -840,6 +840,30 @@ follow the WebP/Promise-executor pattern or wrap it in `try`/`catch` like
 this — never call a browser capability-detection API unguarded at
 top-level script-execution time.
 
+**MP4 length is a target, not one pass over `state.order` (`state.videoLengthSeconds`,
+the "Video length" box, default 3 s, kept across re-loads like fps).** GIF/WebP
+loop on their own, but an MP4 of one cycle is often a fraction of a second
+(2 frames at 8 fps = 0.25 s), which most players and apps (Instagram needs
+≥ 3 s) don't loop nicely. `mp4CycleCount` repeats *whole* cycles until the
+target is reached — rounding up, so the file itself still loops seamlessly.
+Frames are redrawn per cycle rather than cached as `VideoFrame`s (memory
+would scale with order length × resolution); the loop throttles on
+`encodeQueueSize` and inserts a keyframe every ~2 s.
+
+**Result sharing.** "Share…" (`navigator.share` with the file) is shown only
+when `navigator.canShare({files})` says yes — mostly mobile/Safari. "Copy" is
+shown only when `ClipboardItem.supports(type)` exists and returns true:
+Chromium's clipboard accepts only `image/png`, so an animated GIF/WebP/MP4
+can't be copied there and the button stays hidden rather than failing on
+click. Ctrl/Cmd+Z triggers `performUndo` (window-level, skipped while a
+text/number field is focused so those keep native undo).
+
+**Multi-file upload (`app.js`).** Every file input has `multiple`; several
+files picked or dropped onto frame box *i* fill boxes *i, i+1, …* in
+natural filename order (`IMG_9` before `IMG_10`) and commit once. Several
+files on the big MPO box are treated as separate frames from frame 1.
+Extra files beyond `MAX_FRAMES` are dropped with a note in the status line.
+
 The result
 `<img>` can't display a video, so `#output-video` is a separate `<video
 controls loop muted>` element that `generateOutput` shows/hides opposite

@@ -130,11 +130,11 @@
     currentFileBaseName = baseName;
   }
 
-  function finishLoadingFrames(images) {
+  function finishLoadingFrames(images, notice = '') {
     window.Editor.load(images, currentFileBaseName);
-    setStatus(images.length > 2
+    setStatus((images.length > 2
       ? 'Ready — step through aligning each frame below, then crop, adjust, and generate.'
-      : 'Ready — align, crop, and adjust below, then generate the GIF.');
+      : 'Ready — align, crop, and adjust below, then generate the GIF.') + notice);
   }
 
   function setDualBoxFile(zoneEl, nameEl, file) {
@@ -185,6 +185,14 @@
     }
   }
 
+  // Filename order, with numeric runs compared as numbers, so e.g.
+  // IMG_9.jpg sorts before IMG_10.jpg — the order a burst's files were
+  // shot in, regardless of what order the OS picker/drag handed them over.
+  function sortFilesByName(files) {
+    return files.slice().sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  }
+
   function appendFrameBox(index) {
     const clone = frameBoxTemplate.content.cloneNode(true);
     const zoneEl = clone.querySelector('.drop-zone');
@@ -193,7 +201,7 @@
     inputEl.id = `frame-file-input-${index}`;
     dualDropRow.appendChild(clone);
     frameBoxes[index] = { zoneEl, inputEl };
-    wireDropZone(zoneEl, inputEl, (file) => handleFrameFileSelected(index, file));
+    wireDropZone(zoneEl, inputEl, (files) => handleFrameFilesSelected(index, files));
   }
 
   function maybeGrowBoxes() {
@@ -208,14 +216,37 @@
     return n;
   }
 
-  function handleFrameFileSelected(index, file) {
-    pendingFrameFiles[index] = file;
-    setDualBoxFile(frameBoxes[index].zoneEl, frameBoxes[index].zoneEl.querySelector('.file-name'), file);
+  // Several files at once fill box `index` and the ones after it, growing
+  // new boxes as needed (same maybeGrowBoxes path as filling them one at a
+  // time), then commit once — not once per file, which would re-run
+  // Editor.load() for every intermediate prefix.
+  function handleFrameFilesSelected(index, files) {
+    const sorted = sortFilesByName(files).slice(0, MAX_FRAMES - index);
+    sorted.forEach((file, offset) => {
+      const i = index + offset;
+      if (!frameBoxes[i]) appendFrameBox(i);
+      pendingFrameFiles[i] = file;
+      setDualBoxFile(frameBoxes[i].zoneEl, frameBoxes[i].zoneEl.querySelector('.file-name'), file);
+    });
     maybeGrowBoxes();
-    commitFrames();
+    const notice = files.length > sorted.length
+      ? ` (Only ${MAX_FRAMES} frames are supported — used the first ${sorted.length} of ${files.length} files by filename.)`
+      : '';
+    commitFrames(notice);
   }
 
-  async function commitFrames() {
+  // The big MPO box accepts several JPEGs too: more than one file can't be
+  // a single MPO, so treat them as separate frames starting from frame 1.
+  function handleMainFiles(files) {
+    if (files.length === 1) {
+      handleFile(files[0]);
+      return;
+    }
+    resetFrameBoxes();
+    handleFrameFilesSelected(0, files);
+  }
+
+  async function commitFrames(notice = '') {
     const n = contiguousFilledCount();
     if (n < 2) return;
     const files = pendingFrameFiles.slice(0, n);
@@ -225,16 +256,19 @@
     setStatus('Decoding frames…');
     try {
       const images = await Promise.all(files.map(loadImageFromFile));
-      finishLoadingFrames(images);
+      finishLoadingFrames(images, notice);
     } catch (err) {
       console.error(err);
       setStatus(err.message || 'Something went wrong reading those files.', true);
     }
   }
 
-  function wireDropZone(zoneEl, inputEl, onFile) {
+  // onFiles always receives a non-empty File[] — callers decide what to do
+  // with more than one.
+  function wireDropZone(zoneEl, inputEl, onFiles) {
     inputEl.addEventListener('change', () => {
-      if (inputEl.files[0]) onFile(inputEl.files[0]);
+      const files = Array.from(inputEl.files || []);
+      if (files.length) onFiles(files);
     });
     ['dragenter', 'dragover'].forEach((evt) =>
       zoneEl.addEventListener(evt, (e) => {
@@ -248,12 +282,12 @@
     zoneEl.addEventListener('drop', (e) => {
       e.preventDefault();
       zoneEl.classList.remove('dragover');
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (file) onFile(file);
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      if (files.length) onFiles(files);
     });
   }
 
-  wireDropZone(dropZone, fileInput, handleFile);
-  wireDropZone(leftDropZone, leftFileInput, (file) => handleFrameFileSelected(0, file));
-  wireDropZone(rightDropZone, rightFileInput, (file) => handleFrameFileSelected(1, file));
+  wireDropZone(dropZone, fileInput, handleMainFiles);
+  wireDropZone(leftDropZone, leftFileInput, (files) => handleFrameFilesSelected(0, files));
+  wireDropZone(rightDropZone, rightFileInput, (files) => handleFrameFilesSelected(1, files));
 })();

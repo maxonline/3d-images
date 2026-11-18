@@ -61,6 +61,9 @@
   const outputGif = document.getElementById('output-gif');
   const outputVideo = document.getElementById('output-video');
   const downloadLink = document.getElementById('download-link');
+  const shareBtn = document.getElementById('share-btn');
+  const copyBtn = document.getElementById('copy-btn');
+  const videoLengthInput = document.getElementById('video-length-input');
 
   // Declared up front (not down by state's other fields) because the
   // support-detection blocks below call updateGenerateButtonsDisabled(),
@@ -179,6 +182,7 @@
     adjust: { brightness: 0, contrast: 0, hue: 0, sharpness: 0, colorMode: 'normal' },
     fps: 8,
     outputScalePercent: 100,
+    videoLengthSeconds: 3, // MP4 only: state.order is repeated until the video is at least this long
 
     baseOrder: [], // 0-indexed real-frame sequence (defaultOrder() or parseOrder() output)
     interpolationCount: 0, // K in-between frames inserted per step of baseOrder
@@ -1392,6 +1396,18 @@
 
   undoBtn.addEventListener('click', performUndo);
 
+  // Ctrl/Cmd+Z — skipped while typing in a field, so text inputs (e.g. the
+  // animation-order box) keep their own native undo.
+  window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() !== 'z' || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+    const el = document.activeElement;
+    const editsText = !!el && (el.tagName === 'TEXTAREA'
+      || (el.tagName === 'INPUT' && ['text', 'number', 'search', 'url', 'email'].includes(el.type)));
+    if (!undoSnapshot || editsText) return;
+    e.preventDefault();
+    performUndo();
+  });
+
   function nudgeAlign(ddx, ddy) {
     if (state.alignmentLocked) return;
     captureUndoSnapshot();
@@ -2365,6 +2381,17 @@
     return null;
   }
 
+  // MP4 doesn't loop by itself the way GIF/WebP do — one pass over
+  // state.order is often a fraction of a second (2 frames at 8 fps is
+  // 0.25 s), which most players and apps (Instagram needs >= 3 s) won't
+  // loop nicely. Repeat whole cycles until the target length is reached;
+  // rounding up to whole cycles keeps the file itself a seamless loop.
+  function mp4CycleCount(delay) {
+    const cycleMs = state.order.length * delay;
+    if (cycleMs <= 0) return 1;
+    return Math.max(1, Math.ceil((state.videoLengthSeconds * 1000) / cycleMs));
+  }
+
   async function generateMp4(canvas, delay) {
     window.AppShared.setStatus('Encoding MP4…');
     const ctx = canvas.getContext('2d');
@@ -2389,21 +2416,35 @@
     videoEncoder.configure({ codec, width, height, bitrate });
 
     const durationMicros = delay * 1000;
+    const KEYFRAME_INTERVAL_MICROS = 2_000_000;
+    const totalFrames = state.order.length * mp4CycleCount(delay);
     let timestamp = 0;
-    for (let i = 0; i < state.order.length; i++) {
-      drawOrderEntry(ctx, state.order[i], 0, 0, width, height);
+    let lastKeyFrameAt = -Infinity;
+    for (let i = 0; i < totalFrames; i++) {
+      // Without backpressure a long video would queue every frame (each a
+      // full-size copy of the canvas) inside the encoder at once.
+      while (videoEncoder.encodeQueueSize > 8) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      drawOrderEntry(ctx, state.order[i % state.order.length], 0, 0, width, height);
       const videoFrame = new VideoFrame(canvas, { timestamp, duration: durationMicros });
-      videoEncoder.encode(videoFrame, { keyFrame: i === 0 });
+      const keyFrame = timestamp - lastKeyFrameAt >= KEYFRAME_INTERVAL_MICROS;
+      if (keyFrame) lastKeyFrameAt = timestamp;
+      videoEncoder.encode(videoFrame, { keyFrame });
       videoFrame.close();
       timestamp += durationMicros;
-      window.AppShared.setStatus(`Encoding MP4… ${Math.round(((i + 1) / state.order.length) * 100)}%`);
+      window.AppShared.setStatus(`Encoding MP4… ${Math.round(((i + 1) / totalFrames) * 100)}%`);
     }
 
     await videoEncoder.flush();
     videoEncoder.close();
     muxer.finalize();
 
-    return { blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }), extension: 'mp4' };
+    return {
+      blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }),
+      extension: 'mp4',
+      durationSeconds: timestamp / 1_000_000,
+    };
   }
 
   async function generateOutput(format) {
@@ -2439,7 +2480,7 @@
         }
       }
 
-      const { blob, extension } = format === 'webp'
+      const { blob, extension, durationSeconds } = format === 'webp'
         ? await generateWebp(canvas, delay)
         : format === 'mp4'
         ? await generateMp4(canvas, delay)
@@ -2462,7 +2503,9 @@
       downloadLink.href = url;
       downloadLink.download = `${state.baseName}.${extension}`;
       downloadLink.textContent = `Download ${extension.toUpperCase()}`;
-      resultSizeLabel.textContent = `(${extension.toUpperCase()} ${canvas.width} × ${canvas.height} px)`;
+      setResultFile(new File([blob], `${state.baseName}.${extension}`, { type: blob.type }));
+      const durationNote = durationSeconds ? `, ${durationSeconds.toFixed(2).replace(/\.?0+$/, '')} s` : '';
+      resultSizeLabel.textContent = `(${extension.toUpperCase()} ${canvas.width} × ${canvas.height} px${durationNote})`;
       outputEl.hidden = false;
       window.AppShared.setStatus('Done.');
     } catch (err) {
@@ -2472,6 +2515,73 @@
       updateGenerateButtonsDisabled();
     }
   }
+
+  // --- Result sharing: Web Share (mostly mobile) and clipboard ---
+
+  let resultFile = null;
+
+  function canCopyType(type) {
+    if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) return false;
+    // Without supports() there's no way to know up front — and Chromium,
+    // for one, only accepts image/png, so an animated GIF/WebP/MP4 would
+    // just fail at click time. Only offer Copy where the browser says yes.
+    return typeof ClipboardItem.supports === 'function' && ClipboardItem.supports(type);
+  }
+
+  function setResultFile(file) {
+    resultFile = file;
+    let shareable = false;
+    try {
+      shareable = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+    } catch (err) {
+      shareable = false;
+    }
+    shareBtn.hidden = !shareable;
+    let copyable = false;
+    try {
+      copyable = canCopyType(file.type);
+    } catch (err) {
+      copyable = false;
+    }
+    copyBtn.hidden = !copyable;
+    copyBtn.textContent = 'Copy';
+  }
+
+  shareBtn.addEventListener('click', async () => {
+    if (!resultFile) return;
+    try {
+      await navigator.share({ files: [resultFile] });
+    } catch (err) {
+      if (err && err.name === 'AbortError') return; // user closed the share sheet
+      console.error(err);
+      window.AppShared.setStatus("Couldn't share the file — use Download instead.", true);
+    }
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    if (!resultFile) return;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ [resultFile.type]: resultFile })]);
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    } catch (err) {
+      console.error(err);
+      window.AppShared.setStatus("Couldn't copy the file to the clipboard — use Download instead.", true);
+    }
+  });
+
+  // Plain number box, no slider: [1, 60] s, fractional allowed. Kept across
+  // re-loads like fps — it's a preference about the output, not the photo.
+  function readVideoLength() {
+    const v = Number(videoLengthInput.value);
+    if (videoLengthInput.value === '' || !Number.isFinite(v)) return;
+    state.videoLengthSeconds = Math.max(Number(videoLengthInput.min), Math.min(Number(videoLengthInput.max), v));
+  }
+  videoLengthInput.addEventListener('input', readVideoLength);
+  videoLengthInput.addEventListener('blur', () => {
+    videoLengthInput.value = state.videoLengthSeconds;
+  });
+  readVideoLength(); // pick up a value the browser restored on reload
 
   generateGifBtn.addEventListener('click', () => generateOutput('gif'));
   generateWebpBtn.addEventListener('click', () => generateOutput('webp'));
