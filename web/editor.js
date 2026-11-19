@@ -46,6 +46,9 @@
   const fpsValue = document.getElementById('fps-value');
   const interpSlider = document.getElementById('interp-slider');
   const interpValue = document.getElementById('interp-value');
+  const strengthSlider = document.getElementById('strength-slider');
+  const strengthValue = document.getElementById('strength-value');
+  const strengthSectionEl = document.getElementById('strength-section');
 
   const scaleSlider = document.getElementById('scale-slider');
   const scaleValue = document.getElementById('scale-value');
@@ -186,6 +189,7 @@
 
     baseOrder: [], // 0-indexed real-frame sequence (defaultOrder() or parseOrder() output)
     interpolationCount: 0, // K in-between frames inserted per step of baseOrder
+    depthStrength: 100, // percent; >100 synthesizes views beyond the outer frames (applyDepthStrength)
     order: [], // withInterpolation(baseOrder, interpolationCount) — what preview + export actually draw
 
     mode: 'ready', // 'stepping' | 'ready'. Always 'ready' when frames.length === 2.
@@ -722,7 +726,9 @@
     const dy = fa.dy + (fb.dy - fa.dy) * entry.t;
     const offset = { dx, dy };
     drawFrameRaw(destCtx, entry.a, destX, destY, destW, destH, offset, null);
-    drawFrameRaw(destCtx, entry.b, destX, destY, destW, destH, offset, entry.t);
+    // globalAlpha silently ignores out-of-range values, and with depth
+    // strength t can lie outside [0,1].
+    drawFrameRaw(destCtx, entry.b, destX, destY, destW, destH, offset, Math.max(0, Math.min(1, entry.t)));
     applyDestAdjustmentsAndTint(destCtx, destX, destY, destW, destH, entry.a);
   }
 
@@ -814,12 +820,270 @@
 
   const flowPairCache = new Map(); // "a-b" -> { dx: Float32Array, dy: Float32Array, w, h }
   const interpFrameCache = new Map(); // "a-b-t" -> HTMLCanvasElement (small, warped+blended, unadjusted)
+  const depthSignCache = new Map(); // "a-b" -> +1 | -1, see getDepthSign
 
   // Must be called whenever anything the flow was computed FROM changes:
   // a new set of images, or any frame's crop or alignment offset.
   function clearInterpolationCaches() {
     flowPairCache.clear();
     interpFrameCache.clear();
+    depthSignCache.clear();
+  }
+
+  // --- Occlusion-aware interpolation (forward splat + z-buffer) ---
+  //
+  // The blend technique pulls both frames toward t and crossfades them,
+  // with no notion of which surface is in front — so wherever a
+  // foreground edge uncovers background, both layers smear into each
+  // other. This instead PUSHES every source pixel to where it lands at t
+  // (forward splatting), and where several land on the same spot, keeps
+  // only the nearest surface (z-buffer). Both frames are splatted, then
+  // fused per pixel by which one actually saw that surface reliably — the
+  // approach Stereo Studio (github.com/submeonic/Stereo-Studio) uses on
+  // top of a stereo matcher; here flow in both directions stands in for
+  // that matcher, since opencv.js has no StereoSGBM.
+  //
+  // "Nearness" is the horizontal parallax a→b, sign-corrected by
+  // getDepthSign: after alignment, points in front of the aligned plane
+  // shift one way between the frames and points behind it the other way,
+  // and which way is "in front" depends on whether b is right or left of a.
+
+  const SPLAT_DEPTH_TOLERANCE = 0.75; // work-res px of parallax treated as "same surface"
+  const SPLAT_SAME_SURFACE = 1.5; // both frames' depths this close -> crossfade them
+  // Max per-channel difference above which the two frames' splats at a pixel
+  // clearly show different things (typically a thin structure whose flow
+  // the background dragged along). Crossfading those gives a translucent
+  // double; showing the closer frame's alone gives one solid copy.
+  const SPLAT_COLOR_CONFLICT = 40;
+
+  function sampleBilinear(arr, w, h, x, y) {
+    const x0 = Math.max(0, Math.min(w - 1, Math.floor(x)));
+    const y0 = Math.max(0, Math.min(h - 1, Math.floor(y)));
+    const x1 = Math.min(w - 1, x0 + 1);
+    const y1 = Math.min(h - 1, y0 + 1);
+    const fx = Math.max(0, Math.min(1, x - x0));
+    const fy = Math.max(0, Math.min(1, y - y0));
+    const top = arr[y0 * w + x0] * (1 - fx) + arr[y0 * w + x1] * fx;
+    const bottom = arr[y1 * w + x0] * (1 - fx) + arr[y1 * w + x1] * fx;
+    return top * (1 - fy) + bottom * fy;
+  }
+
+  // Forward-backward consistency: a pixel whose a→b flow, followed by the
+  // b→a flow from where it lands, doesn't return home is either occluded
+  // in the other frame or mis-matched. 0..1, 1 = fully consistent.
+  function flowConfidence(fwd, back, w, h) {
+    const conf = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const tx = x + fwd.dx[i];
+        const ty = y + fwd.dy[i];
+        if (tx < 0 || tx > w - 1 || ty < 0 || ty > h - 1) continue; // lands outside: unseen there
+        const ex = fwd.dx[i] + sampleBilinear(back.dx, w, h, tx, ty);
+        const ey = fwd.dy[i] + sampleBilinear(back.dy, w, h, tx, ty);
+        conf[i] = Math.exp(-(ex * ex + ey * ey) / 2);
+      }
+    }
+    return conf;
+  }
+
+  // Pushes every pixel of `rgba` by amount * flow, bilinearly spread over
+  // the 4 destination pixels around where it lands. Pass 1 finds the
+  // nearest surface per destination pixel; pass 2 only accumulates
+  // contributions within SPLAT_DEPTH_TOLERANCE of it, so background
+  // pixels landing under a foreground edge are discarded, not blended in.
+  function splatForward(rgba, flow, amount, near, conf, w, h) {
+    const n = w * h;
+    const zbuf = new Float32Array(n).fill(-Infinity);
+    const color = new Float32Array(n * 3);
+    const weight = new Float32Array(n);
+    const confSum = new Float32Array(n);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          const tx = x + amount * flow.dx[i];
+          const ty = y + amount * flow.dy[i];
+          const x0 = Math.floor(tx);
+          const y0 = Math.floor(ty);
+          const fx = tx - x0;
+          const fy = ty - y0;
+          const z = near[i];
+          for (let oy = 0; oy < 2; oy++) {
+            const yy = y0 + oy;
+            if (yy < 0 || yy >= h) continue;
+            const wy = oy ? fy : 1 - fy;
+            for (let ox = 0; ox < 2; ox++) {
+              const xx = x0 + ox;
+              if (xx < 0 || xx >= w) continue;
+              const wt = wy * (ox ? fx : 1 - fx);
+              if (wt < 1e-3) continue;
+              const j = yy * w + xx;
+              if (pass === 0) {
+                if (z > zbuf[j]) zbuf[j] = z;
+              } else if (z >= zbuf[j] - SPLAT_DEPTH_TOLERANCE) {
+                weight[j] += wt;
+                confSum[j] += wt * (conf ? conf[i] : 1);
+                color[j * 3] += wt * rgba[i * 4];
+                color[j * 3 + 1] += wt * rgba[i * 4 + 1];
+                color[j * 3 + 2] += wt * rgba[i * 4 + 2];
+              }
+            }
+          }
+        }
+      }
+    }
+    for (let j = 0; j < n; j++) {
+      if (weight[j] > 0) {
+        color[j * 3] /= weight[j];
+        color[j * 3 + 1] /= weight[j];
+        color[j * 3 + 2] /= weight[j];
+        confSum[j] /= weight[j];
+      }
+    }
+    return { color, weight, zbuf, conf: confSum };
+  }
+
+  function nearnessFrom(flow, sign, n) {
+    const near = new Float32Array(n);
+    for (let i = 0; i < n; i++) near[i] = -sign * flow.dx[i];
+    return near;
+  }
+
+  // Which horizontal direction means "closer" isn't knowable from one flow
+  // field alone (it flips with eye order / camera direction), so test
+  // both: splat a fully onto b's viewpoint with each sign and keep the one
+  // that reproduces b better. The two candidates only differ where pixels
+  // collide — i.e. exactly at occlusion edges, where the right answer
+  // shows the foreground and the wrong one shows background through it.
+  function getDepthSign(a, b, pixelsA, pixelsB, fwd, back, w, h) {
+    const key = `${a}-${b}`;
+    if (depthSignCache.has(key)) return depthSignCache.get(key);
+    const n = w * h;
+    let best = 1;
+    let bestErr = Infinity;
+    for (const sign of [1, -1]) {
+      let err = 0;
+      for (const [src, dst, flow, s] of [[pixelsA, pixelsB, fwd, sign], [pixelsB, pixelsA, back, -sign]]) {
+        const r = splatForward(src, flow, 1, nearnessFrom(flow, s, n), null, w, h);
+        for (let j = 0; j < n; j++) {
+          if (r.weight[j] <= 0) continue;
+          err += Math.abs(r.color[j * 3] - dst[j * 4])
+            + Math.abs(r.color[j * 3 + 1] - dst[j * 4 + 1])
+            + Math.abs(r.color[j * 3 + 2] - dst[j * 4 + 2]);
+        }
+      }
+      if (err < bestErr) {
+        bestErr = err;
+        best = sign;
+      }
+    }
+    depthSignCache.set(key, best);
+    return best;
+  }
+
+  // Returns RGBA bytes for the in-between view at t. `fallback` (RGBA,
+  // same size) supplies pixels neither frame's splat could cover.
+  function renderSplatInterpolation(pixelsA, pixelsB, fwd, back, sign, t, w, h, fallback) {
+    const n = w * h;
+    // b's flow points back toward a, so the same parallax has the opposite
+    // horizontal sign there — negate to keep both nearness maps comparable.
+    const A = splatForward(pixelsA, fwd, t, nearnessFrom(fwd, sign, n), flowConfidence(fwd, back, w, h), w, h);
+    const B = splatForward(pixelsB, back, 1 - t, nearnessFrom(back, -sign, n), flowConfidence(back, fwd, w, h), w, h);
+
+    // Near either endpoint, ease all the way into that frame's own pixels
+    // so stepping from a real frame to its neighbouring interpolated one
+    // doesn't pop (same easing window as Stereo Studio's render_view).
+    // Beyond an endpoint (t < 0 or t > 1, depth strength) e is 1: the view
+    // is extrapolated from the nearer frame alone, the other only filling
+    // what that one doesn't cover.
+    const tc = Math.max(0, Math.min(1, t));
+    let e = Math.max(0, Math.min(1, (Math.abs(t - 0.5) - 0.35) / 0.15));
+    e = e * e * (3 - 2 * e);
+
+    const color = new Float32Array(n * 3);
+    const near = new Float32Array(n);
+    const filled = new Uint8Array(n);
+    for (let j = 0; j < n; j++) {
+      const vA = A.weight[j] > 0;
+      const vB = B.weight[j] > 0;
+      if (!vA && !vB) continue;
+      let wB; // 0 = all A, 1 = all B
+      if (vA && vB) {
+        const cA = A.conf[j] > 0.5;
+        const cB = B.conf[j] > 0.5;
+        const conflict = Math.max(
+          Math.abs(A.color[j * 3] - B.color[j * 3]),
+          Math.abs(A.color[j * 3 + 1] - B.color[j * 3 + 1]),
+          Math.abs(A.color[j * 3 + 2] - B.color[j * 3 + 2]),
+        ) > SPLAT_COLOR_CONFLICT;
+        const crossfade = conflict ? (t < 0.5 ? 0 : 1) : tc;
+        if (cA && cB) {
+          wB = Math.abs(A.zbuf[j] - B.zbuf[j]) < SPLAT_SAME_SURFACE ? crossfade : (A.zbuf[j] > B.zbuf[j] ? 0 : 1);
+        } else if (cA !== cB) {
+          wB = cA ? 0 : 1; // trust whichever frame actually saw this surface
+        } else {
+          wB = crossfade;
+        }
+        if (t < 0.5) wB *= 1 - e;
+        else wB += (1 - wB) * e;
+      } else {
+        wB = vA ? 0 : 1;
+      }
+      for (let c = 0; c < 3; c++) {
+        color[j * 3 + c] = A.color[j * 3 + c] * (1 - wB) + B.color[j * 3 + c] * wB;
+      }
+      near[j] = wB < 0.5 ? A.zbuf[j] : B.zbuf[j];
+      filled[j] = 1;
+    }
+
+    // Disocclusion holes: extend the BACKGROUND side of each gap along the
+    // row (the side with lower nearness) — a hole opens up where a
+    // foreground edge moved away, so what belongs there is whatever was
+    // behind it. Gaps wider than maxGap fall back to the blend instead of
+    // smearing one pixel across a large area.
+    const maxGap = Math.max(4, Math.round(w * 0.03));
+    const out = new Uint8ClampedArray(n * 4);
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let prev = -1;
+      for (let x = 0; x < w; x++) {
+        const j = row + x;
+        if (filled[j]) {
+          prev = x;
+          continue;
+        }
+        let next = x + 1;
+        while (next < w && !filled[row + next]) next++;
+        const gap = next - prev - 1;
+        for (let hx = x; hx < next; hx++) {
+          const k = row + hx;
+          let src = -1;
+          if (gap <= maxGap) {
+            if (prev >= 0 && next < w) src = near[row + prev] <= near[row + next] ? row + prev : row + next;
+            else if (prev >= 0) src = row + prev;
+            else if (next < w) src = row + next;
+          }
+          if (src >= 0) {
+            color[k * 3] = color[src * 3];
+            color[k * 3 + 1] = color[src * 3 + 1];
+            color[k * 3 + 2] = color[src * 3 + 2];
+          } else {
+            color[k * 3] = fallback[k * 4];
+            color[k * 3 + 1] = fallback[k * 4 + 1];
+            color[k * 3 + 2] = fallback[k * 4 + 2];
+          }
+        }
+        x = next - 1;
+      }
+    }
+    for (let j = 0; j < n; j++) {
+      out[j * 4] = color[j * 3];
+      out[j * 4 + 1] = color[j * 3 + 1];
+      out[j * 4 + 2] = color[j * 3 + 2];
+      out[j * 4 + 3] = 255;
+    }
+    return out;
   }
 
   function computeFlowWorkSize(nativeW, nativeH) {
@@ -882,17 +1146,26 @@
     // the official docs.opencv.org one — or a neural model entirely.)
     cv.calcOpticalFlowFarneback(grayA, grayB, flow, 0.5, 5, 21, 7, 7, 1.5, cv.OPTFLOW_FARNEBACK_GAUSSIAN);
 
-    // flow is CV_32FC2 — interleaved [dx0,dy0, dx1,dy1, ...]. Copy it out
-    // into plain typed arrays we own before deleting the Mat; .data32F is
-    // just a view over WASM memory that goes stale the instant .delete()
-    // runs.
-    const interleaved = flow.data32F;
-    const dx = new Float32Array(w * h);
-    const dy = new Float32Array(w * h);
-    for (let i = 0; i < w * h; i++) {
-      dx[i] = interleaved[i * 2];
-      dy[i] = interleaved[i * 2 + 1];
-    }
+    // A 5x5 median on each flow component removes isolated outlier
+    // vectors (common on thin branches/fine texture) without softening
+    // motion boundaries the way a blur would. Each outlier would otherwise
+    // be splatted somewhere random as a lone speck of the wrong colour.
+    // Copied out into plain typed arrays we own before deleting the Mats;
+    // .data32F is just a view over WASM memory that goes stale the instant
+    // .delete() runs.
+    const channels = new cv.MatVector();
+    cv.split(flow, channels);
+    const components = [0, 1].map((c) => {
+      const raw = channels.get(c);
+      const filtered = new cv.Mat();
+      cv.medianBlur(raw, filtered, 5);
+      const copy = new Float32Array(filtered.data32F);
+      raw.delete();
+      filtered.delete();
+      return copy;
+    });
+    channels.delete();
+    const [dx, dy] = components;
 
     matA.delete();
     matB.delete();
@@ -952,13 +1225,24 @@
     cv.remap(matA, warpedA, mapAx, mapAy, cv.INTER_LINEAR, cv.BORDER_REPLICATE);
     cv.remap(matB, warpedB, mapBx, mapBy, cv.INTER_LINEAR, cv.BORDER_REPLICATE);
 
+    // Only the fill-in for whatever the splat below leaves uncovered (large
+    // disocclusions, frame borders) — no longer the frame itself. Weights
+    // clamped: with depth strength t can lie outside [0,1] (extrapolation).
+    const blendT = Math.max(0, Math.min(1, t));
     const blended = new cv.Mat();
-    cv.addWeighted(warpedA, 1 - t, warpedB, t, 0, blended);
+    cv.addWeighted(warpedA, 1 - blendT, warpedB, blendT, 0, blended);
+    const fallback = new Uint8ClampedArray(blended.data);
+
+    const pixelsA = canvasA.getContext('2d').getImageData(0, 0, w, h).data;
+    const pixelsB = canvasB.getContext('2d').getImageData(0, 0, w, h).data;
+    const back = await getFlowForPair(b, a);
+    const sign = getDepthSign(a, b, pixelsA, pixelsB, { dx, dy }, back, w, h);
+    const out = renderSplatInterpolation(pixelsA, pixelsB, { dx, dy }, back, sign, t, w, h, fallback);
 
     const outCanvas = document.createElement('canvas');
     outCanvas.width = w;
     outCanvas.height = h;
-    cv.imshow(outCanvas, blended);
+    outCanvas.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
 
     matA.delete();
     matB.delete();
@@ -1000,7 +1284,7 @@
 
   function scheduleInterpolationPrep() {
     clearTimeout(interpPrepTimer);
-    if (state.interpolationCount <= 0) return;
+    if (!orderHasSynthesizedFrames()) return;
     interpPrepTimer = setTimeout(() => {
       const token = ++interpPrepToken;
       window.AppShared.setStatus('Preparing optical-flow interpolation…');
@@ -1876,6 +2160,16 @@
   });
   const applyInterpolation = linkSliderWithNumber(interpSlider, interpValue, (v) => {
     state.interpolationCount = v;
+    // Depth strength is only offered alongside interpolated frames. Hiding
+    // it must also switch it off, or a hidden setting would keep turning
+    // the real end frames into synthesized ones. Set directly rather than
+    // via applyStrength: resetOrderToDefault below re-resolves the order.
+    strengthSectionEl.hidden = v <= 0;
+    if (v <= 0) {
+      state.depthStrength = 100;
+      strengthSlider.value = 100;
+      strengthValue.value = 100;
+    }
     updateColorModeAvailability();
     if (state.mode === 'ready') applyModeVisibility(); // order-section visibility depends on interpolationCount for 2-frame sets
     // A different interpolation count means a different vocabulary (see
@@ -1883,6 +2177,17 @@
     // end up referring to different frames than the user chose them for —
     // resetting to the new default avoids that silent reinterpretation.
     resetOrderToDefault();
+  });
+  // Unlike an interpolation-count change, this doesn't change the
+  // vocabulary (strength only moves where each entry sits, not which
+  // entries exist), so a custom typed order is kept and just re-resolved.
+  const applyStrength = linkSliderWithNumber(strengthSlider, strengthValue, (v) => {
+    state.depthStrength = v;
+    updateColorModeAvailability();
+    if (!state.baseOrder.length) return;
+    state.order = resolveOrder(state.baseOrder, frameVocabulary());
+    renderOrderSequenceStrip();
+    scheduleInterpolationPrep();
   });
   const applyBrightness = linkSliderWithNumber(brightnessSlider, brightnessValue, (v) => {
     state.adjust.brightness = v;
@@ -2003,10 +2308,11 @@
   });
 
   // Anaglyph tint is inherently a 2-view concept — disable it once there are
-  // more than 2 frames, falling back to Normal if it was somehow selected.
+  // more than 2 frames (or any synthesized view in play), falling back to
+  // Normal if it was somehow selected.
   function updateColorModeAvailability() {
     const anaglyphRadio = document.querySelector('input[name="color-mode"][value="anaglyph"]');
-    const disable = frameCount() > 2 || state.interpolationCount > 0;
+    const disable = frameCount() > 2 || state.interpolationCount > 0 || state.depthStrength > 100;
     anaglyphRadio.disabled = disable;
     anaglyphRadio.closest('label').classList.toggle('disabled-option', disable);
     if (disable && anaglyphRadio.checked) {
@@ -2063,7 +2369,34 @@
   // necessarily real frame indices once interpolation is on) that
   // resolves to it via this lookup.
   function resolveOrder(baseOrder, vocabulary) {
-    return baseOrder.map((i) => vocabulary[i]);
+    return applyDepthStrength(baseOrder.map((i) => vocabulary[i]));
+  }
+
+  // Depth strength (100% = off): every entry's position along the frame
+  // sequence (frame index + t) is stretched outward so the outermost views
+  // land BEYOND the outer real frames — synthesized by extrapolating the
+  // first/last pair's flow (t < 0 or t > 1), which exaggerates parallax.
+  // The stretch only adds (strength-1)/2 of one frame step past each end,
+  // so for a 2-frame MPO 150% puts the views a quarter step beyond each
+  // eye, while a 10-frame burst's interior hardly moves rather than
+  // extrapolating several steps off the end. At 100% entries are returned
+  // untouched, so real frames stay real frames.
+  function applyDepthStrength(order) {
+    const n = frameCount();
+    const extra = (state.depthStrength / 100 - 1) / 2;
+    if (extra <= 0 || n < 2) return order;
+    const span = n - 1;
+    return order.map((entry) => {
+      const p = typeof entry === 'number' ? entry : entry.a + entry.t * (entry.b - entry.a);
+      const q = (p * (span + 2 * extra)) / span - extra;
+      if (Math.abs(q - Math.round(q)) < 1e-9 && q >= 0 && q <= span) return Math.round(q);
+      const a = Math.max(0, Math.min(n - 2, Math.floor(q)));
+      return { a, b: a + 1, t: q - a };
+    });
+  }
+
+  function orderHasSynthesizedFrames() {
+    return state.order.some((entry) => typeof entry !== 'number');
   }
 
   // Resets the animation order to the default pendulum bounce over the
@@ -2144,7 +2477,7 @@
         }
         const badge = document.createElement('span');
         badge.className = 'seq-thumb-badge';
-        badge.textContent = 'Interpolated';
+        badge.textContent = entry.t < 0 || entry.t > 1 ? 'Extrapolated' : 'Interpolated';
         mediaWrap.appendChild(badge);
       }
 
@@ -2464,7 +2797,7 @@
     generateWebpBtn.disabled = true;
     generateMp4Btn.disabled = true;
     try {
-      if (state.interpolationCount > 0) {
+      if (orderHasSynthesizedFrames()) {
         // Unlike the live preview (which shows the instant rigid fallback
         // and upgrades in place), an export always waits for the real
         // optical-flow frames first — so the file never depends on
@@ -2619,6 +2952,8 @@
     // control's value independently on a page reload, so the two can drift
     // apart (e.g. the number box stuck on a stale "0") if not resynced here.
     applyFps(Number(fpsSlider.value) || state.fps);
+    state.baseOrder = []; // keep applyStrength from re-resolving against the old frame set
+    applyStrength(100);
     applyInterpolation(0);
 
     applyBrightness(0);
@@ -2674,6 +3009,9 @@
     state.frames = [];
     state.baseOrder = [];
     state.interpolationCount = 0;
+    state.depthStrength = 100;
+    strengthSlider.value = 100;
+    strengthValue.value = 100;
     state.order = [];
     state.mode = 'ready';
     state.alignStep = { current: 1, confirmed: [] };

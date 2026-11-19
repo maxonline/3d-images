@@ -126,6 +126,15 @@
         <input type="number" id="interp-value" class="value-input" min="0" max="10" step="1" value="0">
       </div>
       <p class="hint">Uses real motion estimation (optical flow) to blend smoothly toward the next frame instead of a hard cut. The first time you turn this on, it loads a ~13&nbsp;MB library from a CDN — may take a few seconds.</p>
+      <div id="strength-section" hidden>
+      <div class="control-row">
+        <label for="strength-slider">Interpolated depth strength</label>
+        <input type="range" id="strength-slider" min="100" max="200" step="5" value="100" autocomplete="off">
+        <input type="number" id="strength-value" class="value-input" min="100" max="200" step="5" value="100" autocomplete="off">
+        <span class="unit">%</span>
+      </div>
+      <p class="hint">Above 100%, the outermost views are synthesized beyond the original photos to exaggerate the 3D effect (uses the same optical-flow library).</p>
+      </div>
       <div class="control-row">
         <label for="brightness-slider">Brightness</label>
         <input type="range" id="brightness-slider" min="-100" max="100" step="1" value="0">

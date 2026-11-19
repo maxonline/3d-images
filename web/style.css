@@ -425,6 +425,11 @@ h1 {
   font-size: 0.9rem;
 }
 
+/* display:flex above would otherwise override the hidden attribute. */
+.fill-color-row[hidden] {
+  display: none;
+}
+
 .fill-color-row input[type="color"] {
   width: 2.5rem;
   height: 1.75rem;

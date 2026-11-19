@@ -599,6 +599,52 @@ anything the flow was computed from changes — a new upload (`load`/`reset`),
 any alignment-drag or crop-resize-drag end, or an arrow-key nudge — since
 those all change the cropped pixel content flow is computed from.
 
+**Interpolated frames are rendered by occlusion-aware forward splatting
+(`renderSplatInterpolation`), not the two-warp crossfade described above —
+that crossfade now only supplies pixels the splat can't cover.** Ported from
+the rendering half of Stereo Studio (github.com/submeonic/Stereo-Studio):
+Farneback flow is computed in *both* directions, a forward-backward
+consistency check gives per-pixel confidence, and each frame's pixels are
+pushed to `t` with a z-buffer on horizontal parallax ("nearness"), so a
+foreground edge covers the background instead of crossfading with it. The
+two splats are fused by which frame saw each pixel reliably; small
+disocclusion holes are filled from the background side along the row.
+Which horizontal direction means "closer" flips with eye order/camera
+direction, so `getDepthSign` tries both signs per pair and keeps the one
+whose full splat (t=1) reproduces the other frame better — the candidates
+only differ at occlusion edges. Two artifact fixes, both verified on real
+W3 MPOs: a 5×5 median on each flow component (`getFlowForPair`) removes
+outlier vectors that otherwise land as lone specks, and where both frames
+claim the same surface but disagree strongly on colour
+(`SPLAT_COLOR_CONFLICT`, typically a thin structure dragged along by the
+background's flow — antlers, branches) the nearer eye is shown alone
+instead of a translucent double. Thin structures can still look ragged.
+Cost vs the old blend: one extra flow + sign test per pair (~0.5 s) and
+~3× per-frame time (~120 ms vs ~40 ms at 640 px, desktop Chromium).
+Their stereo matcher (StereoSGBM + WLS) isn't in opencv.js — checked.
+
+**Interpolated depth strength (`state.depthStrength`, 100–200%, the
+`#strength-section` slider — only shown while "Interpolated frames" > 0,
+and reset to 100% whenever that drops to 0 so a hidden setting can't stay
+active) synthesizes views beyond
+the outer real frames — `applyDepthStrength`, applied inside `resolveOrder`
+so every path that builds `state.order` gets it.** Each entry's position
+along the sequence (frame index + t) is stretched so the ends land
+`(strength-1)/2` of a frame step past the first/last frame, i.e.
+`{a, b, t}` entries with `t < 0` or `t > 1`, extrapolated from that pair's
+flow (the splat's endpoint easing makes such a view come from the nearer
+frame alone). Deliberately "extra past each end", not "scale around the
+centre": scaling would extrapolate a 10-frame burst several steps off the
+end. At 100% entries come back untouched, so real frames stay plain
+numbers and nothing changes. Because real frames can then become
+synthesized entries too, the "does anything need optical flow" gates (`scheduleInterpolationPrep`, export's
+`prepareInterpolatedFrames` wait) check `orderHasSynthesizedFrames()`
+rather than `interpolationCount > 0`; anaglyph is disabled above 100% too.
+Changing strength keeps a custom typed order (the vocabulary doesn't
+change) and just re-resolves it. `t` outside [0,1] is clamped wherever it's
+used as a blend weight or `globalAlpha` (which silently ignores
+out-of-range values).
+
 **OpenCV.js is loaded from a CDN, not vendored — a deliberate exception to
 this app's usual "vendor everything into web/lib/" rule**, and only lazily,
 the first time interpolation is actually turned on (never a blocking
